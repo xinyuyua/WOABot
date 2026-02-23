@@ -7,9 +7,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytesseract
 
 from .adb_client import AdbClient
-from .config import BotConfig, FlowStepConfig
+from .config import BotConfig, FlowStepConfig, RectPctConfig
 from .detector import MatchResult, load_template, match_template
 
 
@@ -62,6 +63,44 @@ class GameBot:
         out = Path(self.config.screenshot_dir) / f"{label}_{ts}.png"
         cv2.imwrite(str(out), frame)
 
+    def _to_abs_xy(self, frame: np.ndarray, x_pct: float, y_pct: float) -> tuple[int, int]:
+        height, width = frame.shape[:2]
+        x = int(round(x_pct * width))
+        y = int(round(y_pct * height))
+        return x, y
+
+    def _resolve_swipe(self, frame: np.ndarray, step: FlowStepConfig) -> tuple[int, int, int, int, int]:
+        if step.swipe_pct is not None:
+            x1, y1 = self._to_abs_xy(frame, step.swipe_pct.x1, step.swipe_pct.y1)
+            x2, y2 = self._to_abs_xy(frame, step.swipe_pct.x2, step.swipe_pct.y2)
+            return x1, y1, x2, y2, step.swipe_pct.duration_ms
+
+        if step.swipe is not None:
+            return (
+                step.swipe.x1,
+                step.swipe.y1,
+                step.swipe.x2,
+                step.swipe.y2,
+                step.swipe.duration_ms,
+            )
+
+        raise ValueError("Step requires swipe config (`swipe` or `swipe_pct`)")
+
+    def _crop_by_rect_pct(
+        self, frame: np.ndarray, rect: RectPctConfig
+    ) -> tuple[np.ndarray, int, int]:
+        height, width = frame.shape[:2]
+        x = int(round(rect.x * width))
+        y = int(round(rect.y * height))
+        w = int(round(rect.w * width))
+        h = int(round(rect.h * height))
+
+        x = max(0, min(x, width - 1))
+        y = max(0, min(y, height - 1))
+        w = max(1, min(w, width - x))
+        h = max(1, min(h, height - y))
+        return frame[y : y + h, x : x + w], x, y
+
     def _run_click_template_step(self, frame: np.ndarray, step: FlowStepConfig) -> bool:
         match = self._find_match(frame, step.template)
         if not match:
@@ -99,14 +138,94 @@ class GameBot:
                 f"Airport template `{step.template}` not found after {step.max_scrolls} scrolls"
             )
 
-        swipe = step.swipe
-        if swipe is None:
-            raise ValueError("pick_airport step missing swipe config")
-
-        self.adb.swipe(swipe.x1, swipe.y1, swipe.x2, swipe.y2, swipe.duration_ms)
+        x1, y1, x2, y2, duration_ms = self._resolve_swipe(frame, step)
+        self.adb.swipe(x1, y1, x2, y2, duration_ms)
         self.airport_scroll_count += 1
         print(
             f"[FLOW] pick_airport not found, scroll {self.airport_scroll_count}/{step.max_scrolls}"
+        )
+        return False
+
+    def _find_text_center(
+        self,
+        frame: np.ndarray,
+        target_text: str,
+        min_confidence: int,
+        ocr_region_pct: RectPctConfig | None = None,
+    ) -> tuple[int, int, float, str] | None:
+        offset_x, offset_y = 0, 0
+        search_frame = frame
+        if ocr_region_pct is not None:
+            search_frame, offset_x, offset_y = self._crop_by_rect_pct(frame, ocr_region_pct)
+
+        gray = cv2.cvtColor(search_frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+        try:
+            data = pytesseract.image_to_data(
+                gray, output_type=pytesseract.Output.DICT, config="--psm 6"
+            )
+        except pytesseract.TesseractNotFoundError as exc:
+            raise RuntimeError(
+                "Tesseract OCR is not installed. Run `brew install tesseract`."
+            ) from exc
+
+        target = target_text.lower()
+        best: tuple[int, int, float, str] | None = None
+
+        for i, raw_text in enumerate(data.get("text", [])):
+            text = raw_text.strip()
+            if not text:
+                continue
+
+            conf_str = data["conf"][i]
+            try:
+                conf = float(conf_str)
+            except ValueError:
+                continue
+
+            if conf < min_confidence:
+                continue
+            if target not in text.lower():
+                continue
+
+            x = offset_x + int(data["left"][i]) + int(data["width"][i]) // 2
+            y = offset_y + int(data["top"][i]) + int(data["height"][i]) // 2
+            candidate = (x, y, conf, text)
+            if best is None or conf > best[2]:
+                best = candidate
+
+        return best
+
+    def _run_pick_airport_text_step(self, frame: np.ndarray, step: FlowStepConfig) -> bool:
+        found = self._find_text_center(
+            frame,
+            step.target_text,
+            step.min_ocr_confidence,
+            step.ocr_region_pct,
+        )
+        if found:
+            x, y, conf, text = found
+            self.adb.tap(x, y)
+            print(
+                f"[FLOW] pick_airport_text found='{text}' conf={conf:.1f} tap=({x},{y})"
+            )
+            self._save_debug(frame, "airport_text_hit")
+            self.airport_scroll_count = 0
+            self.startup_index += 1
+            return True
+
+        if self.airport_scroll_count >= step.max_scrolls:
+            raise RuntimeError(
+                f"Airport text `{step.target_text}` not found after {step.max_scrolls} scrolls"
+            )
+
+        x1, y1, x2, y2, duration_ms = self._resolve_swipe(frame, step)
+        self.adb.swipe(x1, y1, x2, y2, duration_ms)
+        self.airport_scroll_count += 1
+        print(
+            "[FLOW] pick_airport_text not found "
+            f"('{step.target_text}'), scroll {self.airport_scroll_count}/{step.max_scrolls}"
         )
         return False
 
@@ -119,6 +238,8 @@ class GameBot:
             return self._run_click_template_step(frame, step)
         if step.type == "pick_airport":
             return self._run_pick_airport_step(frame, step)
+        if step.type == "pick_airport_text":
+            return self._run_pick_airport_text_step(frame, step)
 
         raise ValueError(f"Unsupported startup step type: {step.type}")
 
