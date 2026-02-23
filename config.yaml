@@ -1,0 +1,42 @@
+adb_path: adb
+serial: ""
+loop_interval_sec: 1.0
+jitter_sec: 0.2
+screenshot_dir: logs/screens
+save_debug_screenshots: false
+
+templates:
+  - name: start_button
+    path: templates/start_button.png
+    threshold: 0.92
+    action:
+      type: tap_center
+
+  - name: airport_sfo
+    path: templates/airport_sfo.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+  - name: play_button
+    path: templates/play_button.png
+    threshold: 0.92
+    action:
+      type: tap_center
+
+startup_flow:
+  - type: click_template
+    template: start_button
+
+  - type: pick_airport
+    template: airport_sfo
+    max_scrolls: 8
+    swipe:
+      x1: 540
+      y1: 1550
+      x2: 540
+      y2: 650
+      duration_ms: 220
+
+  - type: click_template
+    template: play_button
