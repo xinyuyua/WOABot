@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import re
+import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,13 @@ class GameBot:
         self.button_tap_cache_px: dict[str, tuple[int, int]] = {}
         self.current_plane_name = "unknown"
         self.current_plane_model = "unknown"
+        self.shutdown_requested = False
+        self.handled_action_counts: dict[str, int] = {
+            "processing": 0,
+            "landing": 0,
+            "depart": 0,
+        }
+        self.run_started_epoch: float = 0.0
 
         self._next_sleep_override_sec: float | None = None
 
@@ -1315,10 +1323,36 @@ class GameBot:
             or "no_action" in normalized
             or "not_enough" in normalized
         )
+        if not is_failure and category in self.handled_action_counts:
+            self.handled_action_counts[category] += 1
         if is_failure:
             self._log_fail(
                 f"plane_action_failure name='{name}' model='{model}' category={category} action={action}"
             )
+
+    def _request_shutdown(self, reason: str) -> None:
+        if self.shutdown_requested:
+            return
+        self.shutdown_requested = True
+        print(f"[INFO] Shutdown requested ({reason}). Finishing current loop...")
+
+    def _print_shutdown_report(self) -> None:
+        processing = self.handled_action_counts.get("processing", 0)
+        landing = self.handled_action_counts.get("landing", 0)
+        depart = self.handled_action_counts.get("depart", 0)
+        total = processing + landing + depart
+        runtime_sec = max(0.0, time.time() - self.run_started_epoch)
+        runtime_int = int(runtime_sec)
+        hours = runtime_int // 3600
+        minutes = (runtime_int % 3600) // 60
+        seconds = runtime_int % 60
+        runtime_hms = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        print("[REPORT] Bot session summary")
+        print(f"[REPORT] runtime_sec={runtime_sec:.1f} runtime_hms={runtime_hms}")
+        print(f"[REPORT] handled_total={total}")
+        print(f"[REPORT] handled_processing={processing}")
+        print(f"[REPORT] handled_landing={landing}")
+        print(f"[REPORT] handled_depart={depart}")
 
     def _handle_processing(self, frame: np.ndarray, plane_name: str, plane_model: str) -> bool:
         # Edge case: finish handling is available.
@@ -1969,14 +2003,32 @@ class GameBot:
 
     def run(self) -> None:
         print("[INFO] Starting bot loop. Press Ctrl+C to stop.")
-        while True:
-            try:
-                self.step()
-            except Exception as exc:
-                self._log_error(str(exc))
+        self.run_started_epoch = time.time()
+        prev_sigint = signal.getsignal(signal.SIGINT)
+        prev_sigterm = signal.getsignal(signal.SIGTERM)
 
-            if self._next_sleep_override_sec is not None:
-                sleep_time = self._next_sleep_override_sec
-            else:
-                sleep_time = self.config.loop_interval_sec + random.uniform(0, self.config.jitter_sec)
-            self._sleep(max(0.05, sleep_time))
+        def _on_signal(signum: int, _frame: object) -> None:
+            sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+            self._request_shutdown(sig_name)
+
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+
+        try:
+            while not self.shutdown_requested:
+                try:
+                    self.step()
+                except Exception as exc:
+                    self._log_error(str(exc))
+
+                if self._next_sleep_override_sec is not None:
+                    sleep_time = self._next_sleep_override_sec
+                else:
+                    sleep_time = self.config.loop_interval_sec + random.uniform(0, self.config.jitter_sec)
+                self._sleep(max(0.05, sleep_time))
+        except KeyboardInterrupt:
+            self._request_shutdown("KeyboardInterrupt")
+        finally:
+            signal.signal(signal.SIGINT, prev_sigint)
+            signal.signal(signal.SIGTERM, prev_sigterm)
+            self._print_shutdown_report()
