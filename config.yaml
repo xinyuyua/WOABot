@@ -43,19 +43,19 @@ templates:
 
   - name: processing_tab_button
     path: templates/processing_tab_button.png
-    threshold: 0.80
+    threshold: 0.85
     action:
       type: tap_center
 
   - name: landing_tab_button
     path: templates/landing_tab_button.png
-    threshold: 0.80
+    threshold: 0.85
     action:
       type: tap_center
 
   - name: depart_tab_button
     path: templates/depart_tab_button.png
-    threshold: 0.80
+    threshold: 0.85
     action:
       type: tap_center
 
@@ -214,6 +214,13 @@ phase2:
   processing_toggle_button_template: processing_ramp_agent_toggle_button
   processing_start_handling_template: processing_start_handling_button
   processing_max_add_clicks: 12
+  # Optional explicit list. Any template named button_enabled_incorrect_<N>
+  # is also auto-detected and handled even if not listed here.
+  incorrect_enabled_templates:
+    - button_enabled_incorrect_1
+    - button_enabled_incorrect_2
+    - button_enabled_incorrect_3
+  incorrect_enabled_max_passes: 2
   landing_clear_to_land_template: landing_clear_to_land_button
   landing_select_stand_disabled_template: landing_select_stand_disabled_button
   landing_empty_stand_card_template: landing_empty_stand_option

@@ -98,6 +98,8 @@ class Phase2Config:
     processing_toggle_button_template: str
     processing_start_handling_template: str
     processing_max_add_clicks: int
+    incorrect_enabled_templates: list[str]
+    incorrect_enabled_max_passes: int
     landing_clear_to_land_template: str
     landing_select_stand_disabled_template: str
     landing_empty_stand_card_template: str
@@ -227,6 +229,8 @@ def _build_default_phase2() -> dict[str, Any]:
         "processing_toggle_button_template": "processing_ramp_agent_toggle_button",
         "processing_start_handling_template": "processing_start_handling_button",
         "processing_max_add_clicks": 12,
+        "incorrect_enabled_templates": [],
+        "incorrect_enabled_max_passes": 2,
         "landing_clear_to_land_template": "landing_clear_to_land_button",
         "landing_select_stand_disabled_template": "landing_select_stand_disabled_button",
         "landing_empty_stand_card_template": "landing_empty_stand_option",
@@ -321,6 +325,8 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
             merged.get("processing_start_handling_template", "processing_start_handling_button")
         ),
         processing_max_add_clicks=int(merged.get("processing_max_add_clicks", 12)),
+        incorrect_enabled_templates=[str(x) for x in merged.get("incorrect_enabled_templates", [])],
+        incorrect_enabled_max_passes=int(merged.get("incorrect_enabled_max_passes", 2)),
         landing_clear_to_land_template=str(
             merged.get("landing_clear_to_land_template", merged.get("landing_direct_button_template", ""))
         ),
@@ -372,6 +378,8 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
         raise ValueError("phase2.action_cycle_delay_sec and phase2.idle_cycle_delay_sec must be > 0")
     if phase2.processing_max_add_clicks < 1:
         raise ValueError("phase2.processing_max_add_clicks must be >= 1")
+    if phase2.incorrect_enabled_max_passes < 1:
+        raise ValueError("phase2.incorrect_enabled_max_passes must be >= 1")
     _validate_pct_range("phase2.card_anchor_x_pct", phase2.card_anchor_x_pct)
     _validate_pct_range("phase2.card_start_y_pct", phase2.card_start_y_pct)
     if phase2.card_step_y_pct <= 0 or phase2.card_step_y_pct > 1:

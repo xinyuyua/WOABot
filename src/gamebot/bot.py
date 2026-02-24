@@ -675,7 +675,7 @@ class GameBot:
             do_tap=not self.config.phase2.test_mode,
             debug_label="processing_add_anchor",
         )
-        print(f"[PHASE2] processing add_anchor tap=({tx},{ty})")
+        self._log_debug(f"[PHASE2] processing add_anchor tap=({tx},{ty})")
         return True
 
     def _is_shared_action_anchor_template(self, template_name: str) -> bool:
@@ -1229,6 +1229,41 @@ class GameBot:
         self._log_debug(f"[PHASE2] no actionable {category_name} card in current sweep")
         return False
 
+    def _incorrect_enabled_template_names(self) -> list[str]:
+        names: list[str] = []
+        for name in self.config.phase2.incorrect_enabled_templates:
+            if name and name not in names:
+                names.append(name)
+        # Auto-pick templates named like button_enabled_incorrect_1, _2, ...
+        for name in self.templates.keys():
+            if re.fullmatch(r"button_enabled_incorrect_\d+", name):
+                if name not in names:
+                    names.append(name)
+        return names
+
+    def _clear_incorrect_enabled_buttons(self) -> bool:
+        names = self._incorrect_enabled_template_names()
+        if not names:
+            return False
+
+        clicked_any = False
+        for _ in range(self.config.phase2.incorrect_enabled_max_passes):
+            clicked_in_pass = False
+            frame = self._capture_frame()
+            for name in names:
+                if name not in self.templates:
+                    continue
+                if self._click_template_named(frame, name, f"incorrect_enabled_{name}"):
+                    clicked_in_pass = True
+                    clicked_any = True
+                    time.sleep(self.config.phase2.inter_click_delay_sec)
+                    frame = self._capture_frame()
+            if not clicked_in_pass:
+                break
+        if clicked_any:
+            self._log_debug("[PHASE2] corrected one or more incorrect-enabled buttons")
+        return clicked_any
+
     def _phase2_setup(self, frame: np.ndarray) -> bool:
         action_taken = False
 
@@ -1285,6 +1320,7 @@ class GameBot:
             ]
 
             for name, cfg in categories:
+                any_action = self._clear_incorrect_enabled_buttons() or any_action
                 frame = self._capture_frame()
                 tab_clicked = self._click_template_named(
                     frame,
@@ -1309,14 +1345,17 @@ class GameBot:
             return any_action
 
         any_action = False
+        any_action = self._clear_incorrect_enabled_buttons() or any_action
         frame = self._capture_frame()
         any_action = self._handle_category(frame, "processing", self.config.phase2.processing) or any_action
         time.sleep(self.config.phase2.inter_click_delay_sec)
 
+        any_action = self._clear_incorrect_enabled_buttons() or any_action
         frame = self._capture_frame()
         any_action = self._handle_category(frame, "landing", self.config.phase2.landing) or any_action
         time.sleep(self.config.phase2.inter_click_delay_sec)
 
+        any_action = self._clear_incorrect_enabled_buttons() or any_action
         frame = self._capture_frame()
         any_action = self._handle_category(frame, "depart", self.config.phase2.depart) or any_action
 
