@@ -166,7 +166,7 @@ startup_flow:
     template: start_button
 
   - type: pick_airport_image
-    image: airport_bri.png
+    image: airport_inn.png
     image_threshold: 0.70
     max_scrolls: 8
     swipe_scale: 0.45
@@ -211,6 +211,7 @@ phase2:
     tab_template: depart_tab_button
 
   processing_claim_rewards_template: processing_claim_rewards_button
+  processing_maintenance_template: ""
   processing_finish_handling_template: processing_finish_handling_button
   processing_claim_rewards_and_upgrade_popup_template: processing_claim_rewards_and_upgrade_popup_button
   processing_claim_reward_popup_template: processing_claim_reward_popup_button

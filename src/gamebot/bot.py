@@ -102,6 +102,12 @@ class GameBot:
         delay = max(0.01, seconds + random.uniform(-0.1, 0.1))
         time.sleep(delay)
 
+    def _sleep_exact(self, seconds: float) -> None:
+        time.sleep(max(0.01, seconds))
+
+    def _sleep_card_settle(self) -> None:
+        time.sleep(random.uniform(0.1, 0.2))
+
     def _decode_frame(self, png_bytes: bytes) -> np.ndarray:
         if not png_bytes:
             raise ValueError(
@@ -1355,6 +1361,17 @@ class GameBot:
         print(f"[REPORT] handled_depart={depart}")
 
     def _handle_processing(self, frame: np.ndarray, plane_name: str, plane_model: str) -> bool:
+        # Edge case: maintenance action.
+        maintenance_tmpl = self.config.phase2.processing_maintenance_template
+        if maintenance_tmpl and maintenance_tmpl in self.templates:
+            if self._click_template_named(
+                frame,
+                maintenance_tmpl,
+                "processing_maintenance",
+            ):
+                self._record_plane_action(plane_name, "processing", "maintenance", plane_model)
+                return True
+
         # Edge case: finish handling is available.
         if self._click_template_named(
             frame,
@@ -1375,18 +1392,19 @@ class GameBot:
                 self.config.phase2.processing_claim_reward_popup_template,
             ]
             popup_clicked = False
-            for attempt in range(2):
+            for attempt in range(8):
                 if popup_clicked:
                     break
-                self._sleep(0.12)
-                popup_frame = self._capture_frame()
+                self._sleep_exact(0.08)
                 for popup_tmpl in popup_templates:
                     if not popup_tmpl:
                         continue
+                    popup_frame = self._capture_frame()
                     if self._click_template_named(
                         popup_frame,
                         popup_tmpl,
-                        f"processing_claim_popup_{attempt}",
+                        f"processing_claim_popup_{attempt}_{popup_tmpl}",
+                        allow_cache=False,
                     ):
                         popup_clicked = True
                         break
@@ -1645,6 +1663,7 @@ class GameBot:
     ) -> bool:
         if not self._click_template_named(frame, category_cfg.tab_template, f"{category_name}_tab"):
             return False
+        self._sleep_exact(0.2)
 
         attempts = self._estimate_cards_per_category(self._capture_frame(), category_name)
         attempts = max(1, attempts)
@@ -1652,7 +1671,7 @@ class GameBot:
             frame = self._capture_frame()
             if not self._select_next_card(frame, category_name, dry_run=False, log_prefix="[PHASE2]"):
                 break
-            self._sleep(0.1)
+            self._sleep_card_settle()
             frame = self._capture_frame()
             if self.config.phase2.parse_plane_info:
                 plane_name, plane_model = self._extract_plane_identity(frame)
@@ -1787,13 +1806,14 @@ class GameBot:
                 )
                 card_clicked = False
                 if tab_clicked:
-                    self._sleep(self.config.phase2.inter_click_delay_sec)
+                    self._sleep_exact(0.2)
                     card_clicked = self._test_mode_select_next_card(
                         self._capture_frame(),
                         name,
                         dry_run=False,
                     )
                     if card_clicked and self.config.phase2.parse_plane_info:
+                        self._sleep_card_settle()
                         detail_frame = self._capture_frame()
                         test_plane_name, test_plane_model = self._extract_plane_identity(detail_frame)
                         print(
