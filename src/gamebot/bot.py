@@ -11,7 +11,14 @@ import numpy as np
 import pytesseract
 
 from .adb_client import AdbClient
-from .config import ActionConfig, BotConfig, FlowStepConfig, Phase2CategoryConfig, RectPctConfig
+from .config import (
+    ActionConfig,
+    BotConfig,
+    FlowStepConfig,
+    OffsetRectPctConfig,
+    Phase2CategoryConfig,
+    RectPctConfig,
+)
 from .detector import MatchResult, Template, load_template, match_template
 
 ANSI_RED = "\033[31m"
@@ -276,6 +283,44 @@ class GameBot:
         h = max(1, min(h, height - y))
         return frame[y : y + h, x : x + w], x, y
 
+    def _box_from_rect_pct(self, frame: np.ndarray, rect: RectPctConfig) -> tuple[int, int, int, int]:
+        height, width = frame.shape[:2]
+        x1 = int(round(rect.x * width))
+        y1 = int(round(rect.y * height))
+        x2 = int(round((rect.x + rect.w) * width))
+        y2 = int(round((rect.y + rect.h) * height))
+        x1 = max(0, min(x1, width - 1))
+        y1 = max(0, min(y1, height - 1))
+        x2 = max(x1 + 1, min(x2, width))
+        y2 = max(y1 + 1, min(y2, height))
+        return x1, y1, x2, y2
+
+    def _crop_by_box(
+        self, frame: np.ndarray, box: tuple[int, int, int, int]
+    ) -> tuple[np.ndarray, int, int]:
+        x1, y1, x2, y2 = box
+        return frame[y1:y2, x1:x2], x1, y1
+
+    def _box_from_anchor_offset(
+        self,
+        frame: np.ndarray,
+        anchor_x: int,
+        anchor_y: int,
+        offset: OffsetRectPctConfig,
+    ) -> tuple[int, int, int, int]:
+        h, w = frame.shape[:2]
+        x1 = anchor_x + int(round(offset.x * w))
+        y1 = anchor_y + int(round(offset.y * h))
+        bw = max(1, int(round(offset.w * w)))
+        bh = max(1, int(round(offset.h * h)))
+        x2 = x1 + bw
+        y2 = y1 + bh
+        x1 = max(0, min(x1, w - 1))
+        y1 = max(0, min(y1, h - 1))
+        x2 = max(x1 + 1, min(x2, w))
+        y2 = max(y1 + 1, min(y2, h))
+        return x1, y1, x2, y2
+
     def _run_click_template_step(self, frame: np.ndarray, step: FlowStepConfig) -> bool:
         tmpl = self.templates.get(step.template)
         if tmpl is None:
@@ -526,36 +571,53 @@ class GameBot:
             cached = self.button_tap_cache_px.get(template_name)
             if cached is not None:
                 cx, cy = cached
-                # Validate cache against a small local ROI to avoid stale false clicks.
-                h, w = frame.shape[:2]
-                roi_half_w = max(30, tmpl.image.shape[1] * 2)
-                roi_half_h = max(20, tmpl.image.shape[0] * 2)
-                x1 = max(0, cx - roi_half_w)
-                y1 = max(0, cy - roi_half_h)
-                x2 = min(w - 1, cx + roi_half_w)
-                y2 = min(h - 1, cy + roi_half_h)
-                roi = frame[y1 : y2 + 1, x1 : x2 + 1]
-                if roi.shape[0] >= tmpl.image.shape[0] and roi.shape[1] >= tmpl.image.shape[1]:
-                    local_match = match_template(roi, tmpl)
-                    if local_match is not None:
-                        tx, ty = self._tap_abs(
-                            frame,
-                            cx,
-                            cy,
-                            do_tap=True,
-                            debug_label=f"cached_button_{tag}",
-                        )
-                        self._log_debug(
-                            f"[CACHE] button_hit template={template_name} tap=({tx},{ty}) "
-                            f"local_conf={local_match.confidence:.3f}"
-                        )
-                        return True
-                # Cache stale for current frame; force full-screen rematch and refresh.
-                self._log_debug(f"[CACHE] button_stale template={template_name} cached=({cx},{cy})")
+                if self._is_tab_template_name(template_name) and not self._is_point_in_card_list_region(
+                    frame, cx, cy
+                ):
+                    self._log_debug(
+                        f"[CACHE] button_reject template={template_name} tap=({cx},{cy}) reason=outside_card_list_region"
+                    )
+                    cached = None
+                if cached is None:
+                    pass
+                else:
+                    # Validate cache against a small local ROI to avoid stale false clicks.
+                    h, w = frame.shape[:2]
+                    roi_half_w = max(30, tmpl.image.shape[1] * 2)
+                    roi_half_h = max(20, tmpl.image.shape[0] * 2)
+                    x1 = max(0, cx - roi_half_w)
+                    y1 = max(0, cy - roi_half_h)
+                    x2 = min(w - 1, cx + roi_half_w)
+                    y2 = min(h - 1, cy + roi_half_h)
+                    roi = frame[y1 : y2 + 1, x1 : x2 + 1]
+                    if roi.shape[0] >= tmpl.image.shape[0] and roi.shape[1] >= tmpl.image.shape[1]:
+                        local_match = match_template(roi, tmpl)
+                        if local_match is not None:
+                            tx, ty = self._tap_abs(
+                                frame,
+                                cx,
+                                cy,
+                                do_tap=True,
+                                debug_label=f"cached_button_{tag}",
+                            )
+                            self._log_debug(
+                                f"[CACHE] button_hit template={template_name} tap=({tx},{ty}) "
+                                f"local_conf={local_match.confidence:.3f}"
+                            )
+                            return True
+                    # Cache stale for current frame; force full-screen rematch and refresh.
+                    self._log_debug(f"[CACHE] button_stale template={template_name} cached=({cx},{cy})")
 
         match = match_template(frame, tmpl)
         if not match:
             return False
+        if self._is_tab_template_name(template_name):
+            cx, cy = self._resolve_match_center(frame, match)
+            if not self._is_point_in_card_list_region(frame, cx, cy):
+                self._log_debug(
+                    f"[PHASE2] reject_tab_match template={template_name} tap=({cx},{cy}) reason=outside_card_list_region"
+                )
+                return False
 
         action_cfg = self.template_actions.get(template_name, ActionConfig(type="tap_center"))
         if action_cfg.type != "tap_center":
@@ -589,6 +651,24 @@ class GameBot:
                 )
             self._update_shared_action_button_region(frame, template_name, match)
         return True
+
+    def _is_tab_template_name(self, template_name: str) -> bool:
+        return template_name in {
+            self.config.phase2.processing.tab_template,
+            self.config.phase2.landing.tab_template,
+            self.config.phase2.depart.tab_template,
+        }
+
+    def _is_point_in_card_list_region(self, frame: np.ndarray, x: int, y: int) -> bool:
+        rect = self.config.phase2.card_list_region_pct
+        if rect is None:
+            return True
+        h, w = frame.shape[:2]
+        x1 = int(round(rect.x * w))
+        y1 = int(round(rect.y * h))
+        x2 = int(round((rect.x + rect.w) * w))
+        y2 = int(round((rect.y + rect.h) * h))
+        return x1 <= x <= x2 and y1 <= y <= y2
 
     def _actionable_filter_guard_y(self, frame: np.ndarray) -> int | None:
         actionable_tmpl = self.config.phase2.actionable_filter_template
@@ -646,6 +726,52 @@ class GameBot:
             self._warn_missing_template_once(template_name)
             return None
         return match_template(frame, tmpl)
+
+    def _find_preferred_lower_left_match_named(
+        self, frame: np.ndarray, template_name: str
+    ) -> MatchResult | None:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return None
+        result = cv2.matchTemplate(frame, tmpl.image, cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(result >= tmpl.threshold)
+        if len(xs) == 0:
+            return None
+
+        # Deduplicate dense neighboring hits from the same visual object.
+        candidates: list[tuple[int, int, float]] = []
+        min_dx = max(4, tmpl.image.shape[1] // 3)
+        min_dy = max(4, tmpl.image.shape[0] // 3)
+        ordered = sorted(
+            [(int(x), int(y), float(result[y, x])) for x, y in zip(xs.tolist(), ys.tolist())],
+            key=lambda t: t[2],
+            reverse=True,
+        )
+        for x, y, conf in ordered:
+            if any(abs(x - ox) <= min_dx and abs(y - oy) <= min_dy for ox, oy, _ in candidates):
+                continue
+            candidates.append((x, y, conf))
+
+        # Constrain to likely detail-card area (left side), to avoid right-side list icons.
+        h, w = frame.shape[:2]
+        left_panel = [
+            c
+            for c in candidates
+            if c[0] <= int(w * 0.45) and c[1] >= int(h * 0.18)
+        ]
+        pool = left_panel if left_panel else candidates
+
+        # Lower-left preference: largest y, then smallest x, then highest confidence.
+        x, y, conf = sorted(pool, key=lambda t: (-t[1], t[0], -t[2]))[0]
+        return MatchResult(
+            name=tmpl.name,
+            confidence=conf,
+            x=x,
+            y=y,
+            w=tmpl.image.shape[1],
+            h=tmpl.image.shape[0],
+        )
 
     def _best_conf_for_template(self, frame: np.ndarray, template_name: str) -> float | None:
         tmpl = self.templates.get(template_name)
@@ -873,7 +999,229 @@ class GameBot:
                 best_token = token
         return best_token
 
-    def _ocr_candidates(self, crop: np.ndarray, allow_hyphen: bool) -> list[tuple[str, float]]:
+    def _save_ocr_crop_debug(self, crop: np.ndarray, label: str, parsed: str) -> None:
+        if not self.config.debug_logging:
+            return
+        path = self._save_debug(crop, f"ocr_{label}", force=True)
+        if path:
+            self._log_debug(f"[OCR] region={label} parsed='{parsed}' screenshot={path}")
+
+    def _save_ocr_regions_overlay_debug(
+        self,
+        frame: np.ndarray,
+        name_box: tuple[int, int, int, int],
+        model_box: tuple[int, int, int, int],
+        union_box: tuple[int, int, int, int],
+        parsed_name: str,
+        parsed_model: str,
+        force: bool = False,
+    ) -> None:
+        if not force and not self.config.debug_logging:
+            return
+        debug = frame.copy()
+        nx1, ny1, nx2, ny2 = name_box
+        mx1, my1, mx2, my2 = model_box
+        ux1, uy1, ux2, uy2 = union_box
+        # Red = name/model configured regions, Cyan = union OCR region.
+        cv2.rectangle(debug, (nx1, ny1), (nx2, ny2), (0, 0, 255), 2)
+        cv2.rectangle(debug, (mx1, my1), (mx2, my2), (0, 0, 255), 2)
+        cv2.rectangle(debug, (ux1, uy1), (ux2, uy2), (255, 255, 0), 2)
+        cv2.putText(
+            debug,
+            f"name={parsed_name}",
+            (max(0, nx1), max(15, ny1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            debug,
+            f"model={parsed_model}",
+            (max(0, mx1), max(15, my1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        path = self._save_debug(debug, "ocr_plane_regions_overlay", force=True)
+        if path:
+            if force:
+                self._log_warn(
+                    f"ocr_identity_parse_failed name='{parsed_name}' model='{parsed_model}' overlay={path}",
+                    frame=frame,
+                )
+            else:
+                self._log_debug(f"[OCR] region_overlay screenshot={path}")
+
+    def _extract_text_from_box(
+        self,
+        frame: np.ndarray,
+        box: tuple[int, int, int, int],
+        field: str,
+        allow_hyphen: bool = True,
+        prefer_mixed: bool = True,
+    ) -> str:
+        crop, _, _ = self._crop_by_box(frame, box)
+        ch, cw = crop.shape[:2]
+        if ch < 3 or cw < 3:
+            return "unknown"
+
+        # Fast path: minimal passes for low latency.
+        candidates: list[tuple[str, float]] = []
+        for ratio, bonus in ((0.64, 8.0), (1.0, 0.0)):
+            hh = max(1, int(ch * ratio))
+            sub = crop[:hh, :]
+            for token, conf in self._ocr_candidates(sub, allow_hyphen=allow_hyphen, fast=True):
+                candidates.append((token, conf + bonus))
+
+        if self.config.debug_logging and candidates:
+            preview = [f"{t}:{c:.0f}" for t, c in candidates[:10]]
+            self._log_debug(f"[OCR] {field}_box_candidates={preview}")
+
+        def _pick_best_token(pool: list[tuple[str, float]]) -> tuple[str, float]:
+            best_token = "unknown"
+            best_score = float("-inf")
+            seen: set[str] = set()
+            for token, conf in pool:
+                if token in seen:
+                    continue
+                seen.add(token)
+                has_alpha = bool(re.search(r"[A-Z]", token))
+                has_digit = bool(re.search(r"\d", token))
+                score = conf + min(len(token), 8) * 2.0
+                if has_digit:
+                    score += 8.0
+                if prefer_mixed and has_alpha and has_digit:
+                    score += 18.0
+                if prefer_mixed and not has_digit:
+                    score -= 12.0
+                if len(token) <= 1:
+                    score -= 40.0
+                if score > best_score:
+                    best_score = score
+                    best_token = token
+            return best_token, best_score
+
+        best_token, best_score = _pick_best_token(candidates)
+
+        # Adaptive retry: if fast pass is weak, rerun heavier OCR on the same anchored box.
+        if best_token == "unknown" or (best_score < 38 and not re.search(r"\d", best_token)):
+            slow_candidates: list[tuple[str, float]] = []
+            for ratio, bonus in ((0.64, 8.0), (1.0, 0.0)):
+                hh = max(1, int(ch * ratio))
+                sub = crop[:hh, :]
+                for token, conf in self._ocr_candidates(sub, allow_hyphen=allow_hyphen, fast=False):
+                    slow_candidates.append((token, conf + bonus))
+            if self.config.debug_logging and slow_candidates:
+                preview = [f"{t}:{c:.0f}" for t, c in slow_candidates[:10]]
+                self._log_debug(f"[OCR] {field}_slow_candidates={preview}")
+            slow_best_token, slow_best_score = _pick_best_token(slow_candidates)
+            if slow_best_score > best_score:
+                best_token = slow_best_token
+
+        return best_token
+
+    def _extract_plane_identity(self, frame: np.ndarray) -> tuple[str, str]:
+        name_box: tuple[int, int, int, int] | None = None
+        model_box: tuple[int, int, int, int] | None = None
+
+        anchor_template = self.config.phase2.plane_header_anchor_template
+        if (
+            anchor_template
+            and self.config.phase2.plane_name_from_anchor_pct is not None
+            and self.config.phase2.plane_model_from_anchor_pct is not None
+            and anchor_template in self.templates
+        ):
+            anchor_match = self._find_preferred_lower_left_match_named(frame, anchor_template)
+            if anchor_match is not None:
+                ax, ay = self._resolve_match_center(frame, anchor_match)
+                name_box = self._box_from_anchor_offset(
+                    frame,
+                    ax,
+                    ay,
+                    self.config.phase2.plane_name_from_anchor_pct,
+                )
+                model_box = self._box_from_anchor_offset(
+                    frame,
+                    ax,
+                    ay,
+                    self.config.phase2.plane_model_from_anchor_pct,
+                )
+                self._log_debug(
+                    f"[OCR] anchor={anchor_template} center=({ax},{ay}) "
+                    f"name_box={name_box} model_box={model_box}"
+                )
+
+        if name_box is None or model_box is None:
+            name_rect = self.config.phase2.plane_name_region_pct
+            model_rect = self.config.phase2.plane_model_region_pct
+            if name_rect is None or model_rect is None:
+                return self._extract_plane_name(frame), self._extract_plane_model(frame)
+            name_box = self._box_from_rect_pct(frame, name_rect)
+            model_box = self._box_from_rect_pct(frame, model_rect)
+
+        nx1, ny1, nx2, ny2 = name_box
+        mx1, my1, mx2, my2 = model_box
+
+        ux1 = min(nx1, mx1)
+        uy1 = min(ny1, my1)
+        ux2 = max(nx2, mx2)
+        uy2 = max(ny2, my2)
+        if ux2 <= ux1 or uy2 <= uy1:
+            return self._extract_plane_name(frame), self._extract_plane_model(frame)
+
+        name = self._extract_text_from_box(
+            frame,
+            (nx1, ny1, nx2, ny2),
+            field="plane_name",
+            allow_hyphen=True,
+            prefer_mixed=True,
+        )
+        model = self._extract_text_from_box(
+            frame,
+            (mx1, my1, mx2, my2),
+            field="plane_model",
+            allow_hyphen=True,
+            prefer_mixed=True,
+        )
+
+        need_alt_name = name == "unknown" or not re.search(r"\d", name)
+        need_alt_model = model == "unknown" or not re.search(r"\d", model)
+        if need_alt_name:
+            alt_name = self._extract_plane_name(frame)
+            if name == "unknown" or (not re.search(r"\d", name) and re.search(r"\d", alt_name)):
+                name = alt_name
+        if need_alt_model:
+            alt_model = self._extract_plane_model(frame)
+            if model == "unknown" or (not re.search(r"\d", model) and re.search(r"\d", alt_model)):
+                model = alt_model
+
+        ocr_failed = name == "unknown" or model == "unknown"
+        self._save_ocr_regions_overlay_debug(
+            frame,
+            (nx1, ny1, nx2, ny2),
+            (mx1, my1, mx2, my2),
+            (ux1, uy1, ux2, uy2),
+            name,
+            model,
+            force=ocr_failed,
+        )
+        union_crop, _, _ = self._crop_by_box(frame, (ux1, uy1, ux2, uy2))
+        self._save_ocr_crop_debug(union_crop, "plane_identity_union", parsed=f"name={name} model={model}")
+
+        # Also export exact configured per-field regions for side-by-side tuning.
+        name_crop, _, _ = self._crop_by_box(frame, (nx1, ny1, nx2, ny2))
+        model_crop, _, _ = self._crop_by_box(frame, (mx1, my1, mx2, my2))
+        self._save_ocr_crop_debug(name_crop, "plane_name_region", parsed=name)
+        self._save_ocr_crop_debug(model_crop, "plane_model_region", parsed=model)
+        return name, model
+
+    def _ocr_candidates(
+        self, crop: np.ndarray, allow_hyphen: bool, fast: bool = False
+    ) -> list[tuple[str, float]]:
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
         enlarged = cv2.resize(gray, None, fx=2.2, fy=2.2, interpolation=cv2.INTER_CUBIC)
@@ -887,14 +1235,15 @@ class GameBot:
         )
         inverted = cv2.bitwise_not(thresh)
         otsu = cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        variants = [enlarged, thresh, inverted, otsu]
+        variants = [thresh, enlarged] if fast else [enlarged, thresh, inverted, otsu]
+        psms = (7, 8) if fast else (6, 7, 8, 11)
         whitelist = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" if allow_hyphen else "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         norm_pattern = r"[^A-Z0-9-]" if allow_hyphen else r"[^A-Z0-9]"
 
         raw_candidates: list[tuple[str, float]] = []
         try:
             for img in variants:
-                for psm in (6, 7, 8, 11):
+                for psm in psms:
                     cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={whitelist}"
                     data = pytesseract.image_to_data(
                         img,
@@ -1269,10 +1618,12 @@ class GameBot:
             frame = self._capture_frame()
             if not self._select_next_card(frame, category_name, dry_run=False, log_prefix="[PHASE2]"):
                 break
-            self._sleep(self.config.phase2.inter_click_delay_sec)
+            self._sleep(0.1)
             frame = self._capture_frame()
-            plane_name = self._extract_plane_name(frame)
-            plane_model = self._extract_plane_model(frame)
+            if self.config.phase2.parse_plane_info:
+                plane_name, plane_model = self._extract_plane_identity(frame)
+            else:
+                plane_name, plane_model = "unknown", "unknown"
             self.current_plane_name = plane_name
             self.current_plane_model = plane_model
 
@@ -1408,6 +1759,13 @@ class GameBot:
                         name,
                         dry_run=False,
                     )
+                    if card_clicked and self.config.phase2.parse_plane_info:
+                        detail_frame = self._capture_frame()
+                        test_plane_name, test_plane_model = self._extract_plane_identity(detail_frame)
+                        print(
+                            f"{ANSI_GREEN}[PLANE-TEST]{ANSI_RESET} "
+                            f"name='{test_plane_name}' model='{test_plane_model}' category={name}"
+                        )
                 print(
                     f"[PHASE2-TEST] category={name} tab_clicked={tab_clicked} card_clicked={card_clicked}"
                 )

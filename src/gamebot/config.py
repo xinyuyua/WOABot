@@ -49,6 +49,14 @@ class RectPctConfig:
 
 
 @dataclass
+class OffsetRectPctConfig:
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+@dataclass
 class FlowStepConfig:
     type: str
     template: str = ""
@@ -71,6 +79,7 @@ class Phase2CategoryConfig:
 @dataclass
 class Phase2Config:
     enabled: bool
+    parse_plane_info: bool
     post_start_delay_sec: float
     inter_click_delay_sec: float
     action_cycle_delay_sec: float
@@ -105,6 +114,9 @@ class Phase2Config:
     landing_confirm_button_template: str
     depart_execute_button_template: str
     depart_yellow_button_region_pct: RectPctConfig | None
+    plane_header_anchor_template: str
+    plane_name_from_anchor_pct: OffsetRectPctConfig | None
+    plane_model_from_anchor_pct: OffsetRectPctConfig | None
     plane_name_region_pct: RectPctConfig | None
     plane_model_region_pct: RectPctConfig | None
     crew_available_region_pct: RectPctConfig | None
@@ -173,6 +185,15 @@ def _parse_rect_pct(item: dict[str, Any]) -> RectPctConfig:
     )
 
 
+def _parse_offset_rect_pct(item: dict[str, Any]) -> OffsetRectPctConfig:
+    return OffsetRectPctConfig(
+        x=float(item["x"]),
+        y=float(item["y"]),
+        w=float(item["w"]),
+        h=float(item["h"]),
+    )
+
+
 def _validate_pct_range(label: str, value: float) -> None:
     if value < 0 or value > 1:
         raise ValueError(f"{label} must be between 0 and 1, got {value}")
@@ -194,9 +215,19 @@ def _validate_swipe_pct(swipe: SwipePctConfig) -> None:
     _validate_pct_range("swipe_pct.y2", swipe.y2)
 
 
+def _validate_offset_rect_pct(rect: OffsetRectPctConfig, label_prefix: str) -> None:
+    if rect.w <= 0 or rect.h <= 0:
+        raise ValueError(f"{label_prefix}.w and {label_prefix}.h must be > 0")
+    if rect.w > 1 or rect.h > 1:
+        raise ValueError(f"{label_prefix}.w and {label_prefix}.h must be <= 1")
+    if rect.x < -1 or rect.x > 1 or rect.y < -1 or rect.y > 1:
+        raise ValueError(f"{label_prefix}.x and {label_prefix}.y must be between -1 and 1")
+
+
 def _build_default_phase2() -> dict[str, Any]:
     return {
         "enabled": True,
+        "parse_plane_info": True,
         "post_start_delay_sec": 2.0,
         "inter_click_delay_sec": 0.3,
         "action_cycle_delay_sec": 0.5,
@@ -237,6 +268,9 @@ def _build_default_phase2() -> dict[str, Any]:
         "landing_confirm_button_template": "landing_confirm_button",
         "depart_execute_button_template": "depart_execute_button",
         "depart_yellow_button_region_pct": {"x": 0.02, "y": 0.72, "w": 0.24, "h": 0.24},
+        "plane_header_anchor_template": "",
+        "plane_name_from_anchor_pct": {"x": -0.205, "y": -0.090, "w": 0.075, "h": 0.058},
+        "plane_model_from_anchor_pct": {"x": -0.135, "y": -0.090, "w": 0.055, "h": 0.058},
     }
 
 
@@ -250,6 +284,7 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
 
     phase2 = Phase2Config(
         enabled=bool(merged.get("enabled", True)),
+        parse_plane_info=bool(merged.get("parse_plane_info", True)),
         post_start_delay_sec=float(merged.get("post_start_delay_sec", 2.0)),
         inter_click_delay_sec=float(merged.get("inter_click_delay_sec", 0.3)),
         action_cycle_delay_sec=float(merged.get("action_cycle_delay_sec", 0.5)),
@@ -347,6 +382,17 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
             if "depart_yellow_button_region_pct" in merged
             else None
         ),
+        plane_header_anchor_template=str(merged.get("plane_header_anchor_template", "")),
+        plane_name_from_anchor_pct=(
+            _parse_offset_rect_pct(merged["plane_name_from_anchor_pct"])
+            if "plane_name_from_anchor_pct" in merged
+            else None
+        ),
+        plane_model_from_anchor_pct=(
+            _parse_offset_rect_pct(merged["plane_model_from_anchor_pct"])
+            if "plane_model_from_anchor_pct" in merged
+            else None
+        ),
         plane_name_region_pct=(
             _parse_rect_pct(merged["plane_name_region_pct"])
             if "plane_name_region_pct" in merged
@@ -388,6 +434,16 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
         _validate_rect_pct(phase2.plane_name_region_pct, "phase2.plane_name_region_pct")
     if phase2.plane_model_region_pct is not None:
         _validate_rect_pct(phase2.plane_model_region_pct, "phase2.plane_model_region_pct")
+    if phase2.plane_name_from_anchor_pct is not None:
+        _validate_offset_rect_pct(
+            phase2.plane_name_from_anchor_pct,
+            "phase2.plane_name_from_anchor_pct",
+        )
+    if phase2.plane_model_from_anchor_pct is not None:
+        _validate_offset_rect_pct(
+            phase2.plane_model_from_anchor_pct,
+            "phase2.plane_model_from_anchor_pct",
+        )
     if phase2.crew_available_region_pct is not None:
         _validate_rect_pct(
             phase2.crew_available_region_pct,

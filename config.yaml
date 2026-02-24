@@ -66,6 +66,12 @@ templates:
     action:
       type: tap_center
 
+  - name: processing_plane_header_anchor
+    path: templates/processing_plane_header_anchor.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
   - name: landing_clear_to_land_button
     path: templates/landing_clear_to_land_button.png
     threshold: 0.90
@@ -176,6 +182,7 @@ startup_flow:
 
 phase2:
   enabled: true
+  parse_plane_info: true
   post_start_delay_sec: 2.0
   inter_click_delay_sec: 0.3
   action_cycle_delay_sec: 0.5
@@ -233,16 +240,32 @@ phase2:
     h: 0.24
 
   # Optional OCR regions (0-1 percentages) for enhanced logic/logging.
+  # Preferred: dynamic OCR boxes derived from a stable header anchor template.
+  # Set `plane_header_anchor_template` to a template name (for the eye button),
+  # then tune offsets below. If anchor template is unset/not found, fallback uses
+  # absolute `plane_name_region_pct` / `plane_model_region_pct`.
+  plane_header_anchor_template: processing_plane_header_anchor
+  plane_name_from_anchor_pct:
+    x: -0.205
+    y: -0.090
+    w: 0.075
+    h: 0.058
+  plane_model_from_anchor_pct:
+    x: -0.135
+    y: -0.090
+    w: 0.055
+    h: 0.058
+
   plane_name_region_pct:
-    x: 0.012
-    y: 0.382
-    w: 0.076
-    h: 0.068
+    x: 0.020
+    y: 0.290
+    w: 0.070
+    h: 0.055
   plane_model_region_pct:
-    x: 0.074
-    y: 0.382
-    w: 0.072
-    h: 0.068
+    x: 0.088
+    y: 0.290
+    w: 0.055
+    h: 0.055
   # crew_available_region_pct:
   #   x: 0.42
   #   y: 0.70

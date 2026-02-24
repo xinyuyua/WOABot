@@ -64,6 +64,7 @@ Important flags:
 - `debug_logging`: verbose debug logs (`true`/`false`)
 - `save_debug_screenshots`: save action screenshots (`true`/`false`)
 - `test_mode`: defaults to `true` (test mode). Set to `false` for production/real actions.
+- `phase2.parse_plane_info`: toggle OCR for plane ID/model (`true`/`false`).
 
 ### Template naming for incorrect enabled filters
 
