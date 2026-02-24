@@ -45,7 +45,6 @@ class GameBot:
         self.phase2_grey_enabled = False
         self.phase2_filter_enabled = False
         self.phase2_started = False
-        self.phase2_first_cycle_done = False
         self.phase2_missing_template_warned: set[str] = set()
         self.phase2_plane_memory: dict[str, PlaneRecord] = {}
         self.phase2_test_mode_category_index = 0
@@ -82,6 +81,10 @@ class GameBot:
     def _log_debug(self, msg: str) -> None:
         if self.config.debug_logging:
             print(f"[DEBUG] {msg}")
+
+    def _sleep(self, seconds: float) -> None:
+        delay = max(0.01, seconds + random.uniform(-0.1, 0.1))
+        time.sleep(delay)
 
     def _decode_frame(self, png_bytes: bytes) -> np.ndarray:
         if not png_bytes:
@@ -672,7 +675,7 @@ class GameBot:
             frame,
             x,
             y,
-            do_tap=not self.config.phase2.test_mode,
+            do_tap=not self.config.test_mode,
             debug_label="processing_add_anchor",
         )
         self._log_debug(f"[PHASE2] processing add_anchor tap=({tx},{ty})")
@@ -738,7 +741,7 @@ class GameBot:
             frame,
             cx,
             cy,
-            do_tap=not self.config.phase2.test_mode,
+            do_tap=not self.config.test_mode,
             debug_label="yellow_button_action",
         )
         print(f"[PHASE2] depart yellow_button tap=({cx},{cy}) area={int(area)}")
@@ -937,14 +940,14 @@ class GameBot:
             "processing_claim_rewards",
         ):
             popup_templates = [
-                self.config.phase2.processing_claim_rewards_popup_confirm_template,
+                self.config.phase2.processing_claim_rewards_and_upgrade_popup_template,
                 self.config.phase2.processing_claim_reward_popup_template,
             ]
             popup_clicked = False
             for attempt in range(2):
                 if popup_clicked:
                     break
-                time.sleep(0.12)
+                self._sleep(0.12)
                 popup_frame = self._capture_frame()
                 for popup_tmpl in popup_templates:
                     if not popup_tmpl:
@@ -1002,7 +1005,7 @@ class GameBot:
                     break
                 add_clicks += 1
                 add_loop_reason = "clicked_until_limit_or_disabled"
-                time.sleep(0.08)
+                self._sleep(0.08)
                 check_frame = self._capture_frame()
                 if (
                     self._has_template_named(
@@ -1028,7 +1031,7 @@ class GameBot:
                     break
                 add_clicks += 1
                 add_loop_reason = "clicked_by_anchor_without_template"
-                time.sleep(0.08)
+                self._sleep(0.08)
                 continue
 
             add_loop_reason = "add_button_not_found_and_no_anchor"
@@ -1061,7 +1064,7 @@ class GameBot:
             "processing_toggle",
         )
         if toggled:
-            time.sleep(0.08)
+            self._sleep(0.08)
 
         frame = self._capture_frame()
         started = self._click_template_named(
@@ -1124,7 +1127,7 @@ class GameBot:
                 self._record_plane_action(plane_name, "landing", "stand_selection_no_empty_card")
                 return False
 
-            time.sleep(0.15)
+            self._sleep(0.15)
             frame = self._capture_frame()
             if self._click_template_named(
                 frame,
@@ -1212,7 +1215,7 @@ class GameBot:
             frame = self._capture_frame()
             if not self._select_next_card(frame, category_name, dry_run=False, log_prefix="[PHASE2]"):
                 break
-            time.sleep(self.config.phase2.inter_click_delay_sec)
+            self._sleep(self.config.phase2.inter_click_delay_sec)
             frame = self._capture_frame()
             plane_name = self._extract_plane_name(frame)
             plane_model = self._extract_plane_model(frame)
@@ -1256,7 +1259,7 @@ class GameBot:
                 if self._click_template_named(frame, name, f"incorrect_enabled_{name}"):
                     clicked_in_pass = True
                     clicked_any = True
-                    time.sleep(self.config.phase2.inter_click_delay_sec)
+                    self._sleep(self.config.phase2.inter_click_delay_sec)
                     frame = self._capture_frame()
             if not clicked_in_pass:
                 break
@@ -1272,7 +1275,7 @@ class GameBot:
                 if self._click_template_named(frame, self.config.phase2.grey_mode_template, "grey_mode"):
                     self.phase2_grey_enabled = True
                     action_taken = True
-                    time.sleep(self.config.phase2.inter_click_delay_sec)
+                    self._sleep(self.config.phase2.inter_click_delay_sec)
                     frame = self._capture_frame()
             else:
                 self._warn_missing_template_once(self.config.phase2.grey_mode_template)
@@ -1288,7 +1291,7 @@ class GameBot:
                 )
             ):
                 action_taken = True
-                time.sleep(self.config.phase2.inter_click_delay_sec)
+                self._sleep(self.config.phase2.inter_click_delay_sec)
                 frame = self._capture_frame()
             elif self.config.phase2.filter_button_template not in self.templates:
                 self._warn_missing_template_once(self.config.phase2.filter_button_template)
@@ -1297,7 +1300,7 @@ class GameBot:
                 if self._click_template_named(frame, self.config.phase2.actionable_filter_template, "actionable_filter"):
                     self.phase2_filter_enabled = True
                     action_taken = True
-                    time.sleep(self.config.phase2.inter_click_delay_sec)
+                    self._sleep(self.config.phase2.inter_click_delay_sec)
             else:
                 self._warn_missing_template_once(self.config.phase2.actionable_filter_template)
                 self.phase2_filter_enabled = True
@@ -1311,7 +1314,7 @@ class GameBot:
         if self._phase2_setup(frame):
             return True
 
-        if self.config.phase2.test_mode:
+        if self.config.test_mode:
             any_action = False
             categories: list[tuple[str, Phase2CategoryConfig]] = [
                 ("processing", self.config.phase2.processing),
@@ -1330,7 +1333,7 @@ class GameBot:
                 )
                 card_clicked = False
                 if tab_clicked:
-                    time.sleep(self.config.phase2.inter_click_delay_sec)
+                    self._sleep(self.config.phase2.inter_click_delay_sec)
                     card_clicked = self._test_mode_select_next_card(
                         self._capture_frame(),
                         name,
@@ -1340,24 +1343,27 @@ class GameBot:
                     f"[PHASE2-TEST] category={name} tab_clicked={tab_clicked} card_clicked={card_clicked}"
                 )
                 any_action = any_action or tab_clicked or card_clicked
-                time.sleep(self.config.phase2.inter_click_delay_sec)
+                self._sleep(self.config.phase2.inter_click_delay_sec)
 
             return any_action
 
         any_action = False
         any_action = self._clear_incorrect_enabled_buttons() or any_action
         frame = self._capture_frame()
-        any_action = self._handle_category(frame, "processing", self.config.phase2.processing) or any_action
-        time.sleep(self.config.phase2.inter_click_delay_sec)
+        if self._handle_category(frame, "processing", self.config.phase2.processing):
+            return True
+        self._sleep(self.config.phase2.inter_click_delay_sec)
 
         any_action = self._clear_incorrect_enabled_buttons() or any_action
         frame = self._capture_frame()
-        any_action = self._handle_category(frame, "landing", self.config.phase2.landing) or any_action
-        time.sleep(self.config.phase2.inter_click_delay_sec)
+        if self._handle_category(frame, "landing", self.config.phase2.landing):
+            return True
+        self._sleep(self.config.phase2.inter_click_delay_sec)
 
         any_action = self._clear_incorrect_enabled_buttons() or any_action
         frame = self._capture_frame()
-        any_action = self._handle_category(frame, "depart", self.config.phase2.depart) or any_action
+        if self._handle_category(frame, "depart", self.config.phase2.depart):
+            return True
 
         if not any_action:
             print("[PHASE2] no action performed in this cycle")
@@ -1409,7 +1415,7 @@ class GameBot:
                         debug_label=f"card_select_icon_{category}",
                     )
                 self.phase2_test_mode_card_index[category] = cursor + 1
-                time.sleep(0.2)
+                self._sleep(0.2)
                 print(
                     f"{log_prefix} select_card category={category} mode=icon "
                     f"slot={slot}/{len(icon_matches)} tap=({tx},{ty}) "
@@ -1442,7 +1448,7 @@ class GameBot:
             debug_label=f"card_select_grid_{category}",
         )
         self.phase2_test_mode_card_index[category] = cursor + 1
-        time.sleep(0.2)
+        self._sleep(0.2)
         print(
             f"{log_prefix} select_card category={category} mode=grid slot={slot} "
             f"tap=({tx},{ty}) x_pct={x_pct:.3f} y_pct={y_pct:.3f}"
@@ -1524,20 +1530,14 @@ class GameBot:
         if not self.phase2_started:
             self.phase2_started = True
             if self.config.phase2.post_start_delay_sec > 0:
-                time.sleep(self.config.phase2.post_start_delay_sec)
+                self._sleep(self.config.phase2.post_start_delay_sec)
 
         action_performed = self._run_phase2_cycle(frame)
-        if not self.phase2_first_cycle_done:
-            # Warmup: avoid immediate long idle sleep on the first no-action sweep
-            # right after entering game.
-            self._next_sleep_override_sec = self.config.phase2.action_cycle_delay_sec
-            self.phase2_first_cycle_done = True
-        else:
-            self._next_sleep_override_sec = (
-                self.config.phase2.action_cycle_delay_sec
-                if action_performed
-                else self.config.phase2.idle_cycle_delay_sec
-            )
+        self._next_sleep_override_sec = (
+            self.config.phase2.action_cycle_delay_sec
+            if action_performed
+            else self.config.phase2.idle_cycle_delay_sec
+        )
         return action_performed
 
     def run(self) -> None:
@@ -1552,4 +1552,4 @@ class GameBot:
                 sleep_time = self._next_sleep_override_sec
             else:
                 sleep_time = self.config.loop_interval_sec + random.uniform(0, self.config.jitter_sec)
-            time.sleep(max(0.05, sleep_time))
+            self._sleep(max(0.05, sleep_time))

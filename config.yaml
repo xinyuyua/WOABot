@@ -5,6 +5,7 @@ jitter_sec: 0.2
 screenshot_dir: logs/screens
 debug_logging: false
 save_debug_screenshots: false
+test_mode: true
 
 templates:
   - name: start_button
@@ -103,8 +104,8 @@ templates:
       type: tap_center
 
 
-  - name: processing_claim_rewards_popup_confirm_button
-    path: templates/processing_claim_rewards_popup_confirm_button.png
+  - name: processing_claim_rewards_and_upgrade_popup_button
+    path: templates/processing_claim_rewards_and_upgrade_popup_button.png
     threshold: 0.90
     action:
       type: tap_center
@@ -175,11 +176,10 @@ startup_flow:
 
 phase2:
   enabled: true
-  test_mode: false
   post_start_delay_sec: 2.0
   inter_click_delay_sec: 0.3
-  action_cycle_delay_sec: 2.0
-  idle_cycle_delay_sec: 5.0
+  action_cycle_delay_sec: 0.5
+  idle_cycle_delay_sec: 2.0
   card_key_icon_template: card_alert_icon
   card_list_region_pct:
     x: 0.82
@@ -205,7 +205,7 @@ phase2:
 
   processing_claim_rewards_template: processing_claim_rewards_button
   processing_finish_handling_template: processing_finish_handling_button
-  processing_claim_rewards_popup_confirm_template: processing_claim_rewards_popup_confirm_button
+  processing_claim_rewards_and_upgrade_popup_template: processing_claim_rewards_and_upgrade_popup_button
   processing_claim_reward_popup_template: processing_claim_reward_popup_button
   processing_not_enough_message_template: processing_not_enough_crew_message
   processing_assign_crew_disabled_template: processing_assign_crew_disabled_button

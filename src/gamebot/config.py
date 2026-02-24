@@ -71,7 +71,6 @@ class Phase2CategoryConfig:
 @dataclass
 class Phase2Config:
     enabled: bool
-    test_mode: bool
     post_start_delay_sec: float
     inter_click_delay_sec: float
     action_cycle_delay_sec: float
@@ -88,7 +87,7 @@ class Phase2Config:
     landing: Phase2CategoryConfig
     depart: Phase2CategoryConfig
     processing_claim_rewards_template: str
-    processing_claim_rewards_popup_confirm_template: str
+    processing_claim_rewards_and_upgrade_popup_template: str
     processing_claim_reward_popup_template: str
     processing_finish_handling_template: str
     processing_not_enough_message_template: str
@@ -121,6 +120,7 @@ class BotConfig:
     screenshot_dir: str
     debug_logging: bool
     save_debug_screenshots: bool
+    test_mode: bool
     templates: list[TemplateConfig]
     startup_flow: list[FlowStepConfig]
     phase2: Phase2Config
@@ -134,6 +134,7 @@ def _validate(cfg: dict[str, Any]) -> dict[str, Any]:
         "jitter_sec",
         "screenshot_dir",
         "save_debug_screenshots",
+        "test_mode",
         "templates",
         "startup_flow",
     ]
@@ -196,11 +197,10 @@ def _validate_swipe_pct(swipe: SwipePctConfig) -> None:
 def _build_default_phase2() -> dict[str, Any]:
     return {
         "enabled": True,
-        "test_mode": False,
         "post_start_delay_sec": 2.0,
         "inter_click_delay_sec": 0.3,
-        "action_cycle_delay_sec": 2.0,
-        "idle_cycle_delay_sec": 5.0,
+        "action_cycle_delay_sec": 0.5,
+        "idle_cycle_delay_sec": 2.0,
         "card_list_region_pct": {"x": 0.74, "y": 0.14, "w": 0.24, "h": 0.68},
         "card_key_icon_template": "",
         "card_anchor_x_pct": 0.20,
@@ -219,7 +219,7 @@ def _build_default_phase2() -> dict[str, Any]:
             "tab_template": "depart_tab_button",
         },
         "processing_claim_rewards_template": "processing_claim_rewards_button",
-        "processing_claim_rewards_popup_confirm_template": "processing_claim_rewards_popup_confirm_button",
+        "processing_claim_rewards_and_upgrade_popup_template": "processing_claim_rewards_and_upgrade_popup_button",
         "processing_claim_reward_popup_template": "",
         "processing_finish_handling_template": "processing_finish_handling_button",
         "processing_not_enough_message_template": "processing_not_enough_crew_message",
@@ -250,11 +250,10 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
 
     phase2 = Phase2Config(
         enabled=bool(merged.get("enabled", True)),
-        test_mode=bool(merged.get("test_mode", False)),
         post_start_delay_sec=float(merged.get("post_start_delay_sec", 2.0)),
         inter_click_delay_sec=float(merged.get("inter_click_delay_sec", 0.3)),
-        action_cycle_delay_sec=float(merged.get("action_cycle_delay_sec", 2.0)),
-        idle_cycle_delay_sec=float(merged.get("idle_cycle_delay_sec", 5.0)),
+        action_cycle_delay_sec=float(merged.get("action_cycle_delay_sec", 0.5)),
+        idle_cycle_delay_sec=float(merged.get("idle_cycle_delay_sec", 2.0)),
         card_list_region_pct=(
             _parse_rect_pct(merged["card_list_region_pct"])
             if "card_list_region_pct" in merged
@@ -279,10 +278,10 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
         processing_claim_rewards_template=str(
             merged.get("processing_claim_rewards_template", "processing_claim_rewards_button")
         ),
-        processing_claim_rewards_popup_confirm_template=str(
+        processing_claim_rewards_and_upgrade_popup_template=str(
             merged.get(
-                "processing_claim_rewards_popup_confirm_template",
-                "processing_claim_rewards_popup_confirm_button",
+                "processing_claim_rewards_and_upgrade_popup_template",
+                "processing_claim_rewards_and_upgrade_popup_button",
             )
         ),
         processing_claim_reward_popup_template=str(
@@ -487,7 +486,7 @@ def load_config(path: str) -> BotConfig:
 
         startup_flow.append(flow_step)
 
-    phase2 = _load_phase2(cfg.get("phase2", {}))
+    phase2 = _load_phase2(dict(cfg.get("phase2", {})))
 
     return BotConfig(
         adb_path=cfg["adb_path"],
@@ -497,6 +496,7 @@ def load_config(path: str) -> BotConfig:
         screenshot_dir=cfg["screenshot_dir"],
         debug_logging=bool(cfg.get("debug_logging", False)),
         save_debug_screenshots=bool(cfg["save_debug_screenshots"]),
+        test_mode=bool(cfg["test_mode"]),
         templates=templates,
         startup_flow=startup_flow,
         phase2=phase2,

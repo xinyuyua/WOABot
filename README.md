@@ -1,6 +1,9 @@
-# WOABot (macOS + Android Emulator via ADB)
+# WOABot (macOS + Android Emulator via ADB)# WOABot (macOS + Android Emulator via ADB)
 
 Automation bot for World of Airports running on an Android emulator.
+
+Note:
+- Tested using BlueStacks Air with a resolution of `1600 x 900`; different resolutions may result in incorrect behavior and need tuning.
 
 High-level flow:
 - Phase 1: enter game (`start -> select airport -> play`)
@@ -60,7 +63,7 @@ Main sections:
 Important flags:
 - `debug_logging`: verbose debug logs (`true`/`false`)
 - `save_debug_screenshots`: save action screenshots (`true`/`false`)
-- `phase2.test_mode`: tab/card loop test only (`true`) vs real actions (`false`)
+- `test_mode`: defaults to `true` (test mode). Set to `false` for production/real actions.
 
 ### Template naming for incorrect enabled filters
 
@@ -84,6 +87,20 @@ python3 run_bot.py --config config.yaml
 
 Stop with `Ctrl+C`.
 
+### Production mode
+
+Edit `/Users/xinyuyuan/workspace/CodeX/WOAbot/config.yaml`:
+
+```yaml
+test_mode: false
+```
+
+Then run the same command:
+
+```bash
+python3 run_bot.py --config config.yaml
+```
+
 ## Current behavior summary
 
 ### Phase 1
@@ -102,7 +119,7 @@ Processing:
 - `processing_finish_handling_button` -> click
 - `processing_claim_rewards_button` -> click
   - then checks popup buttons:
-    - `processing_claim_rewards_popup_confirm_button`
+    - `processing_claim_rewards_and_upgrade_popup_button`
     - `processing_claim_reward_popup_button`
 - Assign-crew case:
   - click add first
@@ -118,6 +135,13 @@ Landing:
 Depart:
 - Click `depart_execute_button_template` if available
 - Else click yellow button in `phase2.depart_yellow_button_region_pct`
+
+Loop order and delay:
+- Always try in order: `processing -> landing -> depart`
+- If any category performs an action, restart from `processing`
+- Delay after action cycle: `phase2.action_cycle_delay_sec` (default `0.5`)
+- If no action across all 3 categories, wait `phase2.idle_cycle_delay_sec` (default `2.0`)
+- Every sleep includes a random jitter offset in `[-0.1, +0.1]` seconds
 
 ## OCR notes
 
@@ -137,6 +161,13 @@ Tune these rectangles in `config.yaml` if plane name/model extraction is unstabl
 
 ## Troubleshooting
 
+- `adb devices` shows no emulator/device:
+  - restart adb server:
+    - `adb kill-server`
+    - `adb start-server`
+    - `adb devices`
+  - if still missing, restart emulator and run `adb devices` again
+  - if multiple devices are connected, set `serial` in `config.yaml`
 - `Screenshot bytes are empty or not a valid PNG stream`:
   - verify `adb devices`
   - run `adb exec-out screencap -p > /tmp/screen.png`
