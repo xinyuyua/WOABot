@@ -1,13 +1,10 @@
 # ADB Game Bot Skeleton (macOS + Android Emulator)
 
-Minimal starter bot:
-- Captures emulator screen via `adb exec-out screencap -p`
-- Detects UI elements with OpenCV template matching
-- Detects airport text with OCR (Tesseract)
-- Executes taps/swipes via `adb shell input ...`
-- Runs an ordered startup flow
+Two-phase automation structure:
+- Phase 1: startup flow (`start -> airport -> play`)
+- Phase 2: in-game action loop (`processing -> landing -> depart`)
 
-## 1) Setup
+## Setup
 
 ```bash
 python3 -m venv .venv
@@ -16,53 +13,72 @@ pip install -r requirements.txt
 brew install tesseract
 ```
 
-Make sure emulator is running and visible in `adb devices`.
-
-## 2) Configure startup flow
-
-Edit `/Users/xinyuyuan/workspace/CodeX/WOAbot/config.yaml`.
-
-Current startup flow:
-1. `click_template` -> `start_button`
-2. `pick_airport_text` -> `INN` (scroll list until found by OCR)
-3. `click_template` -> `play_button`
-
-`pick_airport_text` requires:
-- `target_text` keyword (for example `INN`)
-- `min_ocr_confidence`
-- `ocr_region_pct` (OCR scan area, 0-1 relative to screen)
-- `swipe_pct` (gesture points, 0-1 relative to screen)
-- max scroll count
-
-## 3) Add template images
-
-Put cropped images into `/Users/xinyuyuan/workspace/CodeX/WOAbot/templates/`:
-- `start_button.png`
-- `play_button.png`
-
-Tips:
-- Crop tightly around unique UI element/text.
-- Keep emulator resolution fixed so coordinates and templates stay stable.
-
-## 4) Run
+## Run
 
 ```bash
-python /Users/xinyuyuan/workspace/CodeX/WOAbot/run_bot.py --config /Users/xinyuyuan/workspace/CodeX/WOAbot/config.yaml
+python run_bot.py --config config.yaml
 ```
 
-Stop with `Ctrl+C`.
+## Config model
 
-## 5) Tune
+Main file: `/Users/xinyuyuan/workspace/CodeX/WOAbot/config.yaml`
 
-- Template threshold: `0.85` to `0.98`
-- `pick_airport_text.ocr_region_pct` and `pick_airport_text.swipe_pct`
-- `loop_interval_sec` and `jitter_sec`
+Sections:
+- `templates`: all matchable UI elements and thresholds
+- `startup_flow`: launch sequence
+- `phase2`: in-game loop behavior and template mappings
 
-Example for right-side floating scrollbar lane:
-- `ocr_region_pct`: `x: 0.78, y: 0.12, w: 0.20, h: 0.78`
-- `swipe_pct`: `x1: 0.88, y1: 0.86, x2: 0.88, y2: 0.28`
+## Phase 2 behavior
+
+`phase2.test_mode: true` behavior:
+- Refresh actionable filter
+- Cycle tabs only: `processing -> landing -> depart`
+- Optional card loop mode: click card slots one-by-one in configured list region
+- No execution actions
+
+`phase2.test_mode: false` behavior:
+1. Ensure grey mode is enabled.
+2. Click filter button to open filter panel.
+3. Ensure actionable filter is enabled.
+4. Try `processing` category.
+5. Try `landing` category.
+6. Try `depart` category.
+
+Timing:
+- One-time delay after startup enters game: `phase2.post_start_delay_sec` (default `2.0`)
+- Delay between setup/category clicks: `phase2.inter_click_delay_sec` (default `0.3`)
+- If any action happened while sweeping all categories: sleep `phase2.action_cycle_delay_sec` (default `2.0`)
+- If no category action happened: sleep `phase2.idle_cycle_delay_sec` (default `5.0`)
+
+Logs:
+- `[PHASE2]` for category/button actions
+- `[PHASE2-TEST]` for test-mode category loop traces
+- `[PLANE]` for plane-level action records
+- `[TRACE]` and `[DEBUG]` for matching diagnostics
+
+Landing flow (real mode):
+- Case 1: `landing_clear_to_land_button` visible -> click it.
+- Case 2: `landing_select_stand_disabled_button` / stand selection shown:
+  click `landing_empty_stand_option`, then click `landing_confirm_button`.
+
+Test mode card loop tuning:
+- `phase2.card_key_icon_template`: optional template name for icon-driven card detection (for example yellow `!`, default `card_alert_icon`)
+- `phase2.card_list_region_pct`: panel region for card list
+- visible card count is auto-derived from start/step values
+- `phase2.card_anchor_x_pct`: horizontal click anchor inside region
+- `phase2.card_start_y_pct`: first slot vertical position (region-local)
+- `phase2.card_step_y_pct`: vertical distance between slots
 
 ## Notes
 
-- After startup flow completes, `step()` currently logs completion only.
-- Respect game terms of service and account safety.
+- Plane memory is tracked in-process (`name -> last category/action/time`) for future expansion.
+- Crew number logic uses optional OCR regions if configured under `phase2`.
+
+
+Depart fallback:
+- If template action is missing, detect any yellow button in `phase2.depart_yellow_button_region_pct` and click it.
+
+Processing flow (real mode):
+- Case 1: `processing_claim_rewards_button` visible -> click it.
+- Case 2: `processing_assign_crew_disabled_button` visible ->
+  click `processing_add_enabled_button` until disabled, click `processing_ramp_agent_toggle_button`, then click `processing_start_handling_button`.

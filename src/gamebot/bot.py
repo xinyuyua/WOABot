@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,8 +11,19 @@ import numpy as np
 import pytesseract
 
 from .adb_client import AdbClient
-from .config import BotConfig, FlowStepConfig, RectPctConfig
-from .detector import MatchResult, load_template, match_template
+from .config import ActionConfig, BotConfig, FlowStepConfig, Phase2CategoryConfig, RectPctConfig
+from .detector import MatchResult, Template, load_template, match_template
+
+ANSI_RED = "\033[31m"
+ANSI_RESET = "\033[0m"
+
+
+@dataclass
+class PlaneRecord:
+    name: str
+    category: str
+    last_action: str
+    last_seen_epoch_ms: int
 
 
 @dataclass
@@ -24,10 +36,52 @@ class GameBot:
             t.name: load_template(path=t.path, name=t.name, threshold=t.threshold)
             for t in self.config.templates
         }
-        self.template_actions = {t.name: t.action.type for t in self.config.templates}
+        self.template_actions = {t.name: t.action for t in self.config.templates}
+        self.flow_image_templates: dict[str, Template] = {}
+
         self.startup_index = 0
         self.airport_scroll_count = 0
+
+        self.phase2_grey_enabled = False
+        self.phase2_filter_enabled = False
+        self.phase2_started = False
+        self.phase2_first_cycle_done = False
+        self.phase2_missing_template_warned: set[str] = set()
+        self.phase2_plane_memory: dict[str, PlaneRecord] = {}
+        self.phase2_test_mode_category_index = 0
+        self.phase2_test_mode_card_index: dict[str, int] = {
+            "processing": 0,
+            "landing": 0,
+            "depart": 0,
+        }
+        self.shared_action_button_region_px: tuple[int, int, int, int] | None = None
+        self.processing_add_button_anchor_px: tuple[int, int] | None = None
+        self.button_tap_cache_px: dict[str, tuple[int, int]] = {}
+        self.current_plane_name = "unknown"
+        self.current_plane_model = "unknown"
+
+        self._next_sleep_override_sec: float | None = None
+
         Path(self.config.screenshot_dir).mkdir(parents=True, exist_ok=True)
+
+    def _capture_frame(self) -> np.ndarray:
+        return self._decode_frame(self.adb.screenshot_png_bytes())
+
+    def _log_warn(self, msg: str, frame: np.ndarray | None = None) -> None:
+        print(f"{ANSI_RED}[WARN]{ANSI_RESET} !! {msg}")
+        self._capture_failure_snapshot("warn", frame=frame)
+
+    def _log_error(self, msg: str, frame: np.ndarray | None = None) -> None:
+        print(f"{ANSI_RED}[ERROR]{ANSI_RESET} !! {msg}")
+        self._capture_failure_snapshot("error", frame=frame)
+
+    def _log_fail(self, msg: str, frame: np.ndarray | None = None) -> None:
+        print(f"{ANSI_RED}[FAIL]{ANSI_RESET} !! {msg}")
+        self._capture_failure_snapshot("fail", frame=frame)
+
+    def _log_debug(self, msg: str) -> None:
+        if self.config.debug_logging:
+            print(f"[DEBUG] {msg}")
 
     def _decode_frame(self, png_bytes: bytes) -> np.ndarray:
         if not png_bytes:
@@ -44,10 +98,36 @@ class GameBot:
             )
         return frame
 
-    def _tap_match_center(self, match: MatchResult) -> tuple[int, int]:
-        x = match.x + (match.w // 2)
-        y = match.y + (match.h // 2)
+    def _tap_match_center(
+        self,
+        frame: np.ndarray,
+        match: MatchResult,
+        offset_x: int = 0,
+        offset_y: int = 0,
+        debug_label: str | None = None,
+    ) -> tuple[int, int]:
+        x, y = self._resolve_match_center(frame, match, offset_x, offset_y)
         self.adb.tap(x, y)
+        self._save_action_debug(
+            frame,
+            debug_label or f"tap_match_{match.name}",
+            tap_xy=(x, y),
+            match=match,
+        )
+        return x, y
+
+    def _resolve_match_center(
+        self,
+        frame: np.ndarray,
+        match: MatchResult,
+        offset_x: int = 0,
+        offset_y: int = 0,
+    ) -> tuple[int, int]:
+        x = match.x + (match.w // 2) + offset_x
+        y = match.y + (match.h // 2) + offset_y
+        height, width = frame.shape[:2]
+        x = max(0, min(x, width - 1))
+        y = max(0, min(y, height - 1))
         return x, y
 
     def _find_match(self, frame: np.ndarray, template_name: str) -> MatchResult | None:
@@ -56,12 +136,66 @@ class GameBot:
             raise ValueError(f"Template not defined in config.templates: {template_name}")
         return match_template(frame, tmpl)
 
-    def _save_debug(self, frame: np.ndarray, label: str) -> None:
-        if not self.config.save_debug_screenshots:
-            return
+    def _get_flow_image_template(self, image_name: str, threshold: float) -> Template:
+        key = f"{image_name}:{threshold:.4f}"
+        tmpl = self.flow_image_templates.get(key)
+        if tmpl is None:
+            image_path = Path("templates") / image_name
+            tmpl = load_template(path=str(image_path), name=image_name, threshold=threshold)
+            self.flow_image_templates[key] = tmpl
+        return tmpl
+
+    def _best_template_score(self, frame: np.ndarray, tmpl: Template) -> tuple[float, int, int]:
+        result = cv2.matchTemplate(frame, tmpl.image, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        return float(max_val), int(max_loc[0]), int(max_loc[1])
+
+    def _save_debug(self, frame: np.ndarray, label: str, force: bool = False) -> str | None:
+        if not force and not self.config.save_debug_screenshots:
+            return None
         ts = int(time.time() * 1000)
-        out = Path(self.config.screenshot_dir) / f"{label}_{ts}.png"
+        safe_label = re.sub(r"[^a-zA-Z0-9_.-]+", "_", label).strip("_") or "debug"
+        out = Path(self.config.screenshot_dir) / f"{safe_label}_{ts}.png"
         cv2.imwrite(str(out), frame)
+        return str(out)
+
+    def _save_action_debug(
+        self,
+        frame: np.ndarray,
+        label: str,
+        tap_xy: tuple[int, int] | None = None,
+        match: MatchResult | None = None,
+    ) -> str | None:
+        if not self.config.save_debug_screenshots:
+            return None
+        debug = frame.copy()
+        if match is not None:
+            cv2.rectangle(
+                debug,
+                (match.x, match.y),
+                (match.x + match.w, match.y + match.h),
+                (0, 255, 255),
+                2,
+            )
+        if tap_xy is not None:
+            cv2.circle(debug, tap_xy, 8, (0, 0, 255), -1)
+        path = self._save_debug(debug, f"action_{label}", force=False)
+        if path:
+            print(f"[DEBUG] action_screenshot={path}")
+        return path
+
+    def _capture_failure_snapshot(self, label: str, frame: np.ndarray | None = None) -> None:
+        snapshot = frame
+        if snapshot is None:
+            try:
+                snapshot = self._capture_frame()
+            except Exception:
+                snapshot = None
+        if snapshot is None:
+            return
+        path = self._save_debug(snapshot, f"{label}_snapshot", force=True)
+        if path:
+            print(f"[DEBUG] failure_screenshot={path}")
 
     def _to_abs_xy(self, frame: np.ndarray, x_pct: float, y_pct: float) -> tuple[int, int]:
         height, width = frame.shape[:2]
@@ -69,22 +203,59 @@ class GameBot:
         y = int(round(y_pct * height))
         return x, y
 
+    def _tap_abs(
+        self,
+        frame: np.ndarray,
+        x: int,
+        y: int,
+        do_tap: bool = True,
+        debug_label: str = "tap_abs",
+    ) -> tuple[int, int]:
+        height, width = frame.shape[:2]
+        cx = max(0, min(x, width - 1))
+        cy = max(0, min(y, height - 1))
+        if do_tap:
+            self.adb.tap(cx, cy)
+            self._save_action_debug(frame, debug_label, tap_xy=(cx, cy))
+        return cx, cy
+
     def _resolve_swipe(self, frame: np.ndarray, step: FlowStepConfig) -> tuple[int, int, int, int, int]:
         if step.swipe_pct is not None:
             x1, y1 = self._to_abs_xy(frame, step.swipe_pct.x1, step.swipe_pct.y1)
             x2, y2 = self._to_abs_xy(frame, step.swipe_pct.x2, step.swipe_pct.y2)
-            return x1, y1, x2, y2, step.swipe_pct.duration_ms
+            duration_ms = step.swipe_pct.duration_ms
+        elif step.swipe is not None:
+            x1, y1, x2, y2 = step.swipe.x1, step.swipe.y1, step.swipe.x2, step.swipe.y2
+            duration_ms = step.swipe.duration_ms
+        else:
+            raise ValueError("Step requires swipe config (`swipe` or `swipe_pct`)")
 
-        if step.swipe is not None:
-            return (
-                step.swipe.x1,
-                step.swipe.y1,
-                step.swipe.x2,
-                step.swipe.y2,
-                step.swipe.duration_ms,
-            )
+        if step.swipe_scale < 1.0:
+            mx = (x1 + x2) / 2.0
+            my = (y1 + y2) / 2.0
+            dx = (x2 - x1) * step.swipe_scale / 2.0
+            dy = (y2 - y1) * step.swipe_scale / 2.0
+            x1 = int(round(mx - dx))
+            y1 = int(round(my - dy))
+            x2 = int(round(mx + dx))
+            y2 = int(round(my + dy))
 
-        raise ValueError("Step requires swipe config (`swipe` or `swipe_pct`)")
+        return x1, y1, x2, y2, duration_ms
+
+    def _run_search_swipe(self, frame: np.ndarray, step: FlowStepConfig) -> bool:
+        if self.airport_scroll_count >= step.max_scrolls:
+            return False
+
+        x1, y1, x2, y2, duration_ms = self._resolve_swipe(frame, step)
+        self.adb.swipe(x1, y1, x2, y2, duration_ms)
+        if self.config.save_debug_screenshots:
+            debug = frame.copy()
+            cv2.arrowedLine(debug, (x1, y1), (x2, y2), (0, 255, 255), 3, tipLength=0.2)
+            path = self._save_debug(debug, "action_swipe_search")
+            if path:
+                print(f"[DEBUG] action_screenshot={path}")
+        self.airport_scroll_count += 1
+        return True
 
     def _crop_by_rect_pct(
         self, frame: np.ndarray, rect: RectPctConfig
@@ -102,32 +273,55 @@ class GameBot:
         return frame[y : y + h, x : x + w], x, y
 
     def _run_click_template_step(self, frame: np.ndarray, step: FlowStepConfig) -> bool:
-        match = self._find_match(frame, step.template)
+        tmpl = self.templates.get(step.template)
+        if tmpl is None:
+            raise ValueError(f"Template not defined in config.templates: {step.template}")
+        match = match_template(frame, tmpl)
         if not match:
-            print(f"[FLOW] Waiting for template: {step.template}")
+            if step.template == "play_button":
+                self._try_reclick_airport_for_play_recovery(frame)
             return False
 
-        action_type = self.template_actions.get(step.template, "tap_center")
-        if action_type != "tap_center":
+        action_cfg = self.template_actions.get(step.template, ActionConfig(type="tap_center"))
+        if action_cfg.type != "tap_center":
             raise ValueError(
-                f"Unsupported action type `{action_type}` for template `{step.template}`"
+                f"Unsupported action type `{action_cfg.type}` for template `{step.template}`"
             )
 
-        x, y = self._tap_match_center(match)
-        print(
-            f"[FLOW] click_template hit={match.name} conf={match.confidence:.3f} tap=({x},{y})"
+        x, y = self._tap_match_center(
+            frame,
+            match,
+            action_cfg.tap_offset_x,
+            action_cfg.tap_offset_y,
         )
-        self._save_debug(frame, f"flow_hit_{match.name}")
+        debug = frame.copy()
+        cv2.rectangle(debug, (match.x, match.y), (match.x + match.w, match.y + match.h), (0, 255, 255), 2)
+        cv2.circle(debug, (x, y), 8, (0, 0, 255), -1)
+        self._save_debug(debug, f"flow_hit_{match.name}")
         self.startup_index += 1
         return True
+
+    def _try_reclick_airport_for_play_recovery(self, frame: np.ndarray) -> None:
+        airport_step = None
+        for i in range(self.startup_index - 1, -1, -1):
+            candidate = self.config.startup_flow[i]
+            if candidate.type == "pick_airport_image" and candidate.image:
+                airport_step = candidate
+                break
+
+        if airport_step is None:
+            return
+
+        tmpl = self._get_flow_image_template(airport_step.image, airport_step.image_threshold)
+        match = match_template(frame, tmpl)
+        if match:
+            self._tap_match_center(frame, match)
+            return
 
     def _run_pick_airport_step(self, frame: np.ndarray, step: FlowStepConfig) -> bool:
         match = self._find_match(frame, step.template)
         if match:
-            x, y = self._tap_match_center(match)
-            print(
-                f"[FLOW] pick_airport found={match.name} conf={match.confidence:.3f} tap=({x},{y})"
-            )
+            self._tap_match_center(frame, match)
             self._save_debug(frame, f"airport_hit_{match.name}")
             self.airport_scroll_count = 0
             self.startup_index += 1
@@ -135,15 +329,37 @@ class GameBot:
 
         if self.airport_scroll_count >= step.max_scrolls:
             raise RuntimeError(
-                f"Airport template `{step.template}` not found after {step.max_scrolls} scrolls"
+                "Airport template "
+                f"`{step.template}` not found after {step.max_scrolls} attempts"
             )
 
-        x1, y1, x2, y2, duration_ms = self._resolve_swipe(frame, step)
-        self.adb.swipe(x1, y1, x2, y2, duration_ms)
-        self.airport_scroll_count += 1
-        print(
-            f"[FLOW] pick_airport not found, scroll {self.airport_scroll_count}/{step.max_scrolls}"
-        )
+        self._run_search_swipe(frame, step)
+        return False
+
+    def _run_pick_airport_image_step(self, frame: np.ndarray, step: FlowStepConfig) -> bool:
+        tmpl = self._get_flow_image_template(step.image, step.image_threshold)
+        match = match_template(frame, tmpl)
+        if match:
+            self._tap_match_center(frame, match)
+            self._save_debug(frame, f"airport_image_hit_{match.name}")
+            self.airport_scroll_count = 0
+            self.startup_index += 1
+            return True
+
+        if self.airport_scroll_count >= step.max_scrolls:
+            raise RuntimeError(
+                "Airport image "
+                f"`{step.image}` not found after {step.max_scrolls} attempts"
+            )
+
+        if self.config.save_debug_screenshots:
+            best_conf, best_x, best_y = self._best_template_score(frame, tmpl)
+            debug = frame.copy()
+            h, w = tmpl.image.shape[:2]
+            cv2.rectangle(debug, (best_x, best_y), (best_x + w, best_y + h), (0, 255, 255), 2)
+            self._save_debug(debug, f"airport_image_miss_{Path(step.image).stem}")
+
+        self._run_search_swipe(frame, step)
         return False
 
     def _find_text_center(
@@ -153,6 +369,16 @@ class GameBot:
         min_confidence: int,
         ocr_region_pct: RectPctConfig | None = None,
     ) -> tuple[int, int, float, str] | None:
+        def _is_fuzzy_match(target_norm: str, text_norm: str) -> bool:
+            if not target_norm or not text_norm:
+                return False
+            if target_norm in text_norm:
+                return True
+            if len(target_norm) != len(text_norm):
+                return False
+            mismatches = sum(1 for a, b in zip(target_norm, text_norm) if a != b)
+            return mismatches <= 1
+
         offset_x, offset_y = 0, 0
         search_frame = frame
         if ocr_region_pct is not None:
@@ -160,41 +386,69 @@ class GameBot:
 
         gray = cv2.cvtColor(search_frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        enlarged = cv2.resize(gray, None, fx=1.7, fy=1.7, interpolation=cv2.INTER_CUBIC)
+        thresh = cv2.adaptiveThreshold(
+            enlarged,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            5,
+        )
+        inverted = cv2.bitwise_not(thresh)
+
+        variants = [("gray", enlarged), ("thresh", thresh), ("inverted", inverted)]
 
         try:
-            data = pytesseract.image_to_data(
-                gray, output_type=pytesseract.Output.DICT, config="--psm 6"
-            )
+            ocr_config = "--oem 3 --psm 11 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            datasets = [
+                (
+                    name,
+                    pytesseract.image_to_data(
+                        img, output_type=pytesseract.Output.DICT, config=ocr_config
+                    ),
+                )
+                for name, img in variants
+            ]
         except pytesseract.TesseractNotFoundError as exc:
             raise RuntimeError(
                 "Tesseract OCR is not installed. Run `brew install tesseract`."
             ) from exc
 
-        target = target_text.lower()
+        scale = 1.7
+        target = re.sub(r"[^a-z0-9]", "", target_text.lower())
         best: tuple[int, int, float, str] | None = None
+        debug_seen: list[str] = []
 
-        for i, raw_text in enumerate(data.get("text", [])):
-            text = raw_text.strip()
-            if not text:
-                continue
+        for variant_name, data in datasets:
+            for i, raw_text in enumerate(data.get("text", [])):
+                text = raw_text.strip()
+                if not text:
+                    continue
 
-            conf_str = data["conf"][i]
-            try:
-                conf = float(conf_str)
-            except ValueError:
-                continue
+                conf_str = data["conf"][i]
+                try:
+                    conf = float(conf_str)
+                except ValueError:
+                    continue
 
-            if conf < min_confidence:
-                continue
-            if target not in text.lower():
-                continue
+                if conf < min_confidence:
+                    continue
 
-            x = offset_x + int(data["left"][i]) + int(data["width"][i]) // 2
-            y = offset_y + int(data["top"][i]) + int(data["height"][i]) // 2
-            candidate = (x, y, conf, text)
-            if best is None or conf > best[2]:
-                best = candidate
+                normalized = re.sub(r"[^a-z0-9]", "", text.lower())
+                if normalized:
+                    debug_seen.append(f"{variant_name}:{text}:{conf:.0f}")
+                if not _is_fuzzy_match(target, normalized):
+                    continue
 
+                x = offset_x + int((int(data["left"][i]) + int(data["width"][i]) // 2) / scale)
+                y = offset_y + int((int(data["top"][i]) + int(data["height"][i]) // 2) / scale)
+                candidate = (x, y, conf, text)
+                if best is None or conf > best[2]:
+                    best = candidate
+
+        if best is None and debug_seen:
+            print("[OCR] candidates:", ", ".join(debug_seen[:8]))
         return best
 
     def _run_pick_airport_text_step(self, frame: np.ndarray, step: FlowStepConfig) -> bool:
@@ -206,10 +460,7 @@ class GameBot:
         )
         if found:
             x, y, conf, text = found
-            self.adb.tap(x, y)
-            print(
-                f"[FLOW] pick_airport_text found='{text}' conf={conf:.1f} tap=({x},{y})"
-            )
+            self._tap_abs(frame, x, y, do_tap=True, debug_label="airport_text_hit_ocr")
             self._save_debug(frame, "airport_text_hit")
             self.airport_scroll_count = 0
             self.startup_index += 1
@@ -217,16 +468,11 @@ class GameBot:
 
         if self.airport_scroll_count >= step.max_scrolls:
             raise RuntimeError(
-                f"Airport text `{step.target_text}` not found after {step.max_scrolls} scrolls"
+                "Airport text "
+                f"`{step.target_text}` not found after {step.max_scrolls} attempts"
             )
 
-        x1, y1, x2, y2, duration_ms = self._resolve_swipe(frame, step)
-        self.adb.swipe(x1, y1, x2, y2, duration_ms)
-        self.airport_scroll_count += 1
-        print(
-            "[FLOW] pick_airport_text not found "
-            f"('{step.target_text}'), scroll {self.airport_scroll_count}/{step.max_scrolls}"
-        )
+        self._run_search_swipe(frame, step)
         return False
 
     def _run_startup_flow_step(self, frame: np.ndarray) -> bool:
@@ -238,19 +484,1022 @@ class GameBot:
             return self._run_click_template_step(frame, step)
         if step.type == "pick_airport":
             return self._run_pick_airport_step(frame, step)
+        if step.type == "pick_airport_image":
+            return self._run_pick_airport_image_step(frame, step)
         if step.type == "pick_airport_text":
             return self._run_pick_airport_text_step(frame, step)
 
         raise ValueError(f"Unsupported startup step type: {step.type}")
 
+    def _warn_missing_template_once(self, template_name: str) -> None:
+        if template_name in self.phase2_missing_template_warned:
+            return
+        self.phase2_missing_template_warned.add(template_name)
+        self._log_warn(f"phase2 template not configured or missing from templates: {template_name}")
+
+    def _is_static_cached_template(self, template_name: str) -> bool:
+        static_non_button_templates = {
+            "processing_not_enough_crew_message",
+            "processing_not_enough_message",
+        }
+        lower = template_name.lower()
+        return "button" in lower or template_name in static_non_button_templates
+
+    def _click_template_named(
+        self,
+        frame: np.ndarray,
+        template_name: str,
+        tag: str,
+        dry_run: bool = False,
+    ) -> bool:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return False
+
+        if not dry_run and self._is_static_cached_template(template_name):
+            cached = self.button_tap_cache_px.get(template_name)
+            if cached is not None:
+                cx, cy = cached
+                # Validate cache against a small local ROI to avoid stale false clicks.
+                h, w = frame.shape[:2]
+                roi_half_w = max(30, tmpl.image.shape[1] * 2)
+                roi_half_h = max(20, tmpl.image.shape[0] * 2)
+                x1 = max(0, cx - roi_half_w)
+                y1 = max(0, cy - roi_half_h)
+                x2 = min(w - 1, cx + roi_half_w)
+                y2 = min(h - 1, cy + roi_half_h)
+                roi = frame[y1 : y2 + 1, x1 : x2 + 1]
+                if roi.shape[0] >= tmpl.image.shape[0] and roi.shape[1] >= tmpl.image.shape[1]:
+                    local_match = match_template(roi, tmpl)
+                    if local_match is not None:
+                        tx, ty = self._tap_abs(
+                            frame,
+                            cx,
+                            cy,
+                            do_tap=True,
+                            debug_label=f"cached_button_{tag}",
+                        )
+                        self._log_debug(
+                            f"[CACHE] button_hit template={template_name} tap=({tx},{ty}) "
+                            f"local_conf={local_match.confidence:.3f}"
+                        )
+                        return True
+                # Cache stale for current frame; force full-screen rematch and refresh.
+                self._log_debug(f"[CACHE] button_stale template={template_name} cached=({cx},{cy})")
+
+        match = match_template(frame, tmpl)
+        if not match:
+            return False
+
+        action_cfg = self.template_actions.get(template_name, ActionConfig(type="tap_center"))
+        if action_cfg.type != "tap_center":
+            self._log_warn(f"Unsupported action type for {template_name}: {action_cfg.type}")
+            return False
+
+        if dry_run:
+            x, y = self._resolve_match_center(
+                frame,
+                match,
+                action_cfg.tap_offset_x,
+                action_cfg.tap_offset_y,
+            )
+            print(
+                f"[PHASE2-TEST] would_click tag={tag} template={template_name} "
+                f"tap=({x},{y}) conf={match.confidence:.3f}"
+            )
+        else:
+            tx, ty = self._tap_match_center(
+                frame,
+                match,
+                action_cfg.tap_offset_x,
+                action_cfg.tap_offset_y,
+                debug_label=f"template_{tag}",
+            )
+            if self._is_static_cached_template(template_name):
+                self.button_tap_cache_px[template_name] = (tx, ty)
+                self._log_debug(
+                    f"[CACHE] button_set template={template_name} tap=({tx},{ty}) "
+                    f"conf={match.confidence:.3f}"
+                )
+            self._update_shared_action_button_region(frame, template_name, match)
+        return True
+
+    def _click_leftmost_template_named(
+        self,
+        frame: np.ndarray,
+        template_name: str,
+        tag: str,
+    ) -> bool:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return False
+        result = cv2.matchTemplate(frame, tmpl.image, cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(result >= tmpl.threshold)
+        if len(xs) == 0:
+            return False
+        idx = min(range(len(xs)), key=lambda i: (int(xs[i]), int(ys[i])))
+        x = int(xs[idx])
+        y = int(ys[idx])
+        match = MatchResult(
+            name=tmpl.name,
+            confidence=float(result[y, x]),
+            x=x,
+            y=y,
+            w=tmpl.image.shape[1],
+            h=tmpl.image.shape[0],
+        )
+        self._tap_match_center(
+            frame,
+            match,
+            debug_label=f"leftmost_{tag}",
+        )
+        return True
+
+    def _has_template_named(self, frame: np.ndarray, template_name: str) -> bool:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return False
+        return match_template(frame, tmpl) is not None
+
+    def _match_template_named(self, frame: np.ndarray, template_name: str) -> MatchResult | None:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return None
+        return match_template(frame, tmpl)
+
+    def _best_conf_for_template(self, frame: np.ndarray, template_name: str) -> float | None:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            return None
+        conf, _, _ = self._best_template_score(frame, tmpl)
+        return conf
+
+    def _find_rightmost_match_named(self, frame: np.ndarray, template_name: str) -> MatchResult | None:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return None
+        result = cv2.matchTemplate(frame, tmpl.image, cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(result >= tmpl.threshold)
+        if len(xs) == 0:
+            return None
+        idx = max(range(len(xs)), key=lambda i: (int(xs[i]), float(result[ys[i], xs[i]])))
+        x = int(xs[idx])
+        y = int(ys[idx])
+        return MatchResult(
+            name=tmpl.name,
+            confidence=float(result[y, x]),
+            x=x,
+            y=y,
+            w=tmpl.image.shape[1],
+            h=tmpl.image.shape[0],
+        )
+
+    def _set_processing_add_anchor_from_match(self, frame: np.ndarray, match: MatchResult) -> None:
+        x, y = self._resolve_match_center(frame, match)
+        self.processing_add_button_anchor_px = (x, y)
+        print(f"[PHASE2] processing add_anchor set=({x},{y}) conf={match.confidence:.3f}")
+
+    def _click_processing_add_anchor(self, frame: np.ndarray) -> bool:
+        if self.processing_add_button_anchor_px is None:
+            return False
+        x, y = self.processing_add_button_anchor_px
+        tx, ty = self._tap_abs(
+            frame,
+            x,
+            y,
+            do_tap=not self.config.phase2.test_mode,
+            debug_label="processing_add_anchor",
+        )
+        print(f"[PHASE2] processing add_anchor tap=({tx},{ty})")
+        return True
+
+    def _is_shared_action_anchor_template(self, template_name: str) -> bool:
+        anchors = {
+            self.config.phase2.landing_confirm_button_template,
+            self.config.phase2.landing_clear_to_land_template,
+            self.config.phase2.depart_execute_button_template,
+        }
+        return template_name in anchors
+
+    def _update_shared_action_button_region(
+        self,
+        frame: np.ndarray,
+        template_name: str,
+        match: MatchResult,
+    ) -> None:
+        if not self._is_shared_action_anchor_template(template_name):
+            return
+
+        h, w = frame.shape[:2]
+        # Expand around known action button to cover nearby text/shape variance.
+        pad_x = int(match.w * 0.55)
+        pad_y = int(match.h * 0.45)
+        x1 = max(0, match.x - pad_x)
+        y1 = max(0, match.y - pad_y)
+        x2 = min(w - 1, match.x + match.w + pad_x)
+        y2 = min(h - 1, match.y + match.h + pad_y)
+        self.shared_action_button_region_px = (x1, y1, x2, y2)
+
+    def _click_yellow_button_in_region(self, frame: np.ndarray, rect: RectPctConfig) -> bool:
+        if self.shared_action_button_region_px is not None:
+            x1, y1, x2, y2 = self.shared_action_button_region_px
+            crop = frame[y1 : y2 + 1, x1 : x2 + 1]
+            ox, oy = x1, y1
+        else:
+            crop, ox, oy = self._crop_by_rect_pct(frame, rect)
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+
+        # Yellow range tuned for UI buttons.
+        lower = np.array([18, 70, 120], dtype=np.uint8)
+        upper = np.array([45, 255, 255], dtype=np.uint8)
+        mask = cv2.inRange(hsv, lower, upper)
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return False
+
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+        if area < 1500:
+            return False
+
+        x, y, w, h = cv2.boundingRect(largest)
+        cx = ox + x + w // 2
+        cy = oy + y + h // 2
+        self._tap_abs(
+            frame,
+            cx,
+            cy,
+            do_tap=not self.config.phase2.test_mode,
+            debug_label="yellow_button_action",
+        )
+        print(f"[PHASE2] depart yellow_button tap=({cx},{cy}) area={int(area)}")
+        return True
+
+    def _extract_text_from_region(self, frame: np.ndarray, rect: RectPctConfig) -> str:
+        crop, _, _ = self._crop_by_rect_pct(frame, rect)
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        thresh = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            25,
+            5,
+        )
+        try:
+            return pytesseract.image_to_string(thresh, config="--oem 3 --psm 7").strip()
+        except pytesseract.TesseractNotFoundError as exc:
+            raise RuntimeError("Tesseract OCR is not installed. Run `brew install tesseract`.") from exc
+
+    def _extract_int_from_text(self, text: str) -> int | None:
+        m = re.search(r"\d+", text)
+        if not m:
+            return None
+        return int(m.group(0))
+
+    def _extract_plane_name(self, frame: np.ndarray) -> str:
+        rect = self.config.phase2.plane_name_region_pct
+        if rect is None:
+            return "unknown"
+        crop, _, _ = self._crop_by_rect_pct(frame, rect)
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        enlarged = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        thresh = cv2.adaptiveThreshold(
+            enlarged,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            5,
+        )
+        inverted = cv2.bitwise_not(thresh)
+        variants = [enlarged, thresh, inverted]
+        ocr_cfgs = [
+            "--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-",
+            "--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-",
+        ]
+        candidates: list[str] = []
+        try:
+            for img in variants:
+                for cfg in ocr_cfgs:
+                    txt = pytesseract.image_to_string(img, config=cfg).upper().strip()
+                    txt = re.sub(r"[^A-Z0-9-]", "", txt)
+                    if txt:
+                        candidates.append(txt)
+        except pytesseract.TesseractNotFoundError as exc:
+            raise RuntimeError("Tesseract OCR is not installed. Run `brew install tesseract`.") from exc
+
+        if self.config.debug_logging and candidates:
+            print(f"[OCR] plane_name_candidates={candidates[:6]}")
+
+        # Merge split OCR tokens when name is broken into alpha/numeric pieces:
+        # e.g. "ENO" + "011" -> "ENO011".
+        alpha_tokens = [t for t in candidates if re.fullmatch(r"[A-Z]{2,5}", t)]
+        digit_tokens = [t for t in candidates if re.fullmatch(r"\d{2,5}", t)]
+        merged: list[str] = []
+        for a in alpha_tokens[:4]:
+            for d in digit_tokens[:4]:
+                merged.append(f"{a}{d}")
+                merged.append(f"{a}-{d}")
+        candidates.extend(merged)
+
+        uniq: list[str] = []
+        for txt in candidates:
+            if txt not in uniq:
+                uniq.append(txt)
+        if uniq:
+            # Prefer alnum-mixed identifiers first (most common for flight IDs),
+            # then dashed forms, then longer tokens.
+            uniq.sort(
+                key=lambda s: (
+                    1 if (re.search(r"[A-Z]", s) and re.search(r"\d", s)) else 0,
+                    1 if ("-" in s and re.search(r"[A-Z]", s) and re.search(r"\d", s)) else 0,
+                    len(s),
+                ),
+                reverse=True,
+            )
+            return uniq[0]
+        return "unknown"
+
+    def _extract_plane_model(self, frame: np.ndarray) -> str:
+        rect = self.config.phase2.plane_model_region_pct
+        if rect is None:
+            return "unknown"
+        crop, _, _ = self._crop_by_rect_pct(frame, rect)
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        enlarged = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        thresh = cv2.adaptiveThreshold(
+            enlarged,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            5,
+        )
+        inverted = cv2.bitwise_not(thresh)
+        variants = [enlarged, thresh, inverted]
+        ocr_cfgs = [
+            "--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        ]
+        candidates: list[str] = []
+        try:
+            for img in variants:
+                for cfg in ocr_cfgs:
+                    txt = pytesseract.image_to_string(img, config=cfg).upper().strip()
+                    txt = re.sub(r"[^A-Z0-9]", "", txt)
+                    if txt:
+                        candidates.append(txt)
+        except pytesseract.TesseractNotFoundError as exc:
+            raise RuntimeError("Tesseract OCR is not installed. Run `brew install tesseract`.") from exc
+
+        if self.config.debug_logging and candidates:
+            print(f"[OCR] plane_model_candidates={candidates[:6]}")
+
+        uniq: list[str] = []
+        for txt in candidates:
+            if txt not in uniq:
+                uniq.append(txt)
+        if uniq:
+            # Prefer tokens with letters, then by length.
+            uniq.sort(key=lambda s: (1 if re.search(r"[A-Z]", s) else 0, len(s)), reverse=True)
+            return uniq[0]
+        return "unknown"
+
+    def _extract_crew_counts(self, frame: np.ndarray) -> tuple[int | None, int | None]:
+        available_rect = self.config.phase2.crew_available_region_pct
+        required_rect = self.config.phase2.crew_required_region_pct
+        if available_rect is None or required_rect is None:
+            return None, None
+
+        available_text = self._extract_text_from_region(frame, available_rect)
+        required_text = self._extract_text_from_region(frame, required_rect)
+        return self._extract_int_from_text(available_text), self._extract_int_from_text(required_text)
+
+    def _record_plane_action(
+        self,
+        plane_name: str,
+        category: str,
+        action: str,
+        plane_model: str | None = None,
+    ) -> None:
+        now_ms = int(time.time() * 1000)
+        name = plane_name if plane_name else "unknown"
+        model = plane_model if plane_model else self.current_plane_model
+        key = f"{name}|{model}"
+        self.phase2_plane_memory[key] = PlaneRecord(
+            name=name,
+            category=category,
+            last_action=action,
+            last_seen_epoch_ms=now_ms,
+        )
+        print(f"[PLANE] name='{name}' model='{model}' category={category} action={action}")
+        normalized = action.lower()
+        if normalized.startswith("skip_"):
+            return
+        is_failure = (
+            "not_started" in normalized
+            or "not_found" in normalized
+            or "no_action" in normalized
+            or "not_enough" in normalized
+        )
+        if is_failure:
+            self._log_fail(
+                f"plane_action_failure name='{name}' model='{model}' category={category} action={action}"
+            )
+
+    def _handle_processing(self, frame: np.ndarray, plane_name: str) -> bool:
+        # Edge case: finish handling is available.
+        if self._click_template_named(
+            frame,
+            self.config.phase2.processing_finish_handling_template,
+            "processing_finish_handling",
+        ):
+            self._record_plane_action(plane_name, "processing", "finish_handling")
+            return True
+
+        # Case 1: claim rewards is available.
+        if self._click_template_named(
+            frame,
+            self.config.phase2.processing_claim_rewards_template,
+            "processing_claim_rewards",
+        ):
+            popup_templates = [
+                self.config.phase2.processing_claim_rewards_popup_confirm_template,
+                self.config.phase2.processing_claim_reward_popup_template,
+            ]
+            popup_clicked = False
+            for attempt in range(2):
+                if popup_clicked:
+                    break
+                time.sleep(0.12)
+                popup_frame = self._capture_frame()
+                for popup_tmpl in popup_templates:
+                    if not popup_tmpl:
+                        continue
+                    if self._click_template_named(
+                        popup_frame,
+                        popup_tmpl,
+                        f"processing_claim_popup_{attempt}",
+                    ):
+                        popup_clicked = True
+                        break
+            self._record_plane_action(
+                plane_name,
+                "processing",
+                f"claim_rewards popup_confirm={popup_clicked}",
+            )
+            return True
+
+        frame = self._capture_frame()
+        assign_crew_disabled = self._has_template_named(
+            frame,
+            self.config.phase2.processing_assign_crew_disabled_template,
+        )
+        if not assign_crew_disabled:
+            self._record_plane_action(plane_name, "processing", "skip_no_processing_action")
+            return False
+
+        # Case 2: assign crew disabled -> click add first -> if not enough before toggle, skip -> then toggle -> start handling.
+        toggled = False
+
+        add_clicks = 0
+        add_loop_reason = "unknown"
+        for _ in range(self.config.phase2.processing_max_add_clicks):
+            frame = self._capture_frame()
+            if self._has_template_named(
+                frame,
+                self.config.phase2.processing_not_enough_message_template,
+            ):
+                add_loop_reason = "not_enough_before_toggle"
+                break
+            add_match = self._find_rightmost_match_named(
+                frame, self.config.phase2.processing_add_enabled_template
+            )
+            has_enabled = add_match is not None
+            has_disabled = self._has_template_named(
+                frame,
+                self.config.phase2.processing_add_disabled_template,
+            )
+
+            if has_enabled:
+                if self.processing_add_button_anchor_px is None and add_match is not None:
+                    self._set_processing_add_anchor_from_match(frame, add_match)
+                if not self._click_processing_add_anchor(frame):
+                    add_loop_reason = "add_anchor_not_set"
+                    break
+                add_clicks += 1
+                add_loop_reason = "clicked_until_limit_or_disabled"
+                time.sleep(0.08)
+                check_frame = self._capture_frame()
+                if (
+                    self._has_template_named(
+                        check_frame,
+                        self.config.phase2.processing_not_enough_message_template,
+                    )
+                    and self._has_template_named(
+                        check_frame,
+                        self.config.phase2.processing_add_enabled_template,
+                    )
+                ):
+                    add_loop_reason = "not_enough_after_add"
+                    break
+                continue
+
+            if has_disabled:
+                add_loop_reason = "already_disabled"
+                break
+
+            if self.processing_add_button_anchor_px is not None:
+                if not self._click_processing_add_anchor(frame):
+                    add_loop_reason = "add_anchor_not_set"
+                    break
+                add_clicks += 1
+                add_loop_reason = "clicked_by_anchor_without_template"
+                time.sleep(0.08)
+                continue
+
+            add_loop_reason = "add_button_not_found_and_no_anchor"
+            break
+
+        if add_loop_reason == "not_enough_after_add":
+            self._record_plane_action(
+                plane_name,
+                "processing",
+                f"skip_not_enough_after_add add_clicks={add_clicks} toggled={toggled}",
+            )
+            return False
+
+        frame = self._capture_frame()
+        if self._has_template_named(
+            frame,
+            self.config.phase2.processing_not_enough_message_template,
+        ):
+            self._record_plane_action(
+                plane_name,
+                "processing",
+                f"skip_not_enough_before_toggle add_clicks={add_clicks} toggled={toggled}",
+            )
+            return False
+
+        frame = self._capture_frame()
+        toggled = self._click_template_named(
+            frame,
+            self.config.phase2.processing_toggle_button_template,
+            "processing_toggle",
+        )
+        if toggled:
+            time.sleep(0.08)
+
+        frame = self._capture_frame()
+        started = self._click_template_named(
+            frame,
+            self.config.phase2.processing_start_handling_template,
+            "processing_start_handling",
+        )
+
+        if started:
+            self._record_plane_action(
+                plane_name,
+                "processing",
+                f"assign_crew_started add_clicks={add_clicks} toggled={toggled} reason={add_loop_reason}",
+            )
+            return True
+
+        self._record_plane_action(
+            plane_name,
+            "processing",
+            f"assign_crew_not_started add_clicks={add_clicks} toggled={toggled} reason={add_loop_reason}",
+        )
+        if add_clicks == 0:
+            add_enabled_conf = self._best_conf_for_template(
+                self._capture_frame(),
+                self.config.phase2.processing_add_enabled_template,
+            )
+            add_disabled_conf = self._best_conf_for_template(
+                self._capture_frame(),
+                self.config.phase2.processing_add_disabled_template,
+            )
+            print(
+                "[PHASE2] processing add_debug "
+                f"enabled_conf={add_enabled_conf} disabled_conf={add_disabled_conf}"
+            )
+        return add_clicks > 0 or toggled
+
+    def _handle_landing(self, frame: np.ndarray, plane_name: str) -> bool:
+        # Case 1: stand selection flow (priority to avoid false clear-to-land hits).
+        frame = self._capture_frame()
+        stand_selection_needed = (
+            self._has_template_named(frame, self.config.phase2.landing_select_stand_disabled_template)
+            or self._has_template_named(frame, self.config.phase2.landing_empty_stand_card_template)
+        )
+
+        if stand_selection_needed:
+            empty_clicked = self._click_leftmost_template_named(
+                frame,
+                self.config.phase2.landing_empty_stand_card_template,
+                "landing_empty_stand",
+            )
+            if not empty_clicked:
+                frame = self._capture_frame()
+                empty_clicked = self._click_leftmost_template_named(
+                    frame,
+                    self.config.phase2.landing_empty_stand_card_template,
+                    "landing_empty_stand_retry",
+                )
+
+            if not empty_clicked:
+                self._record_plane_action(plane_name, "landing", "stand_selection_no_empty_card")
+                return False
+
+            time.sleep(0.15)
+            frame = self._capture_frame()
+            if self._click_template_named(
+                frame,
+                self.config.phase2.landing_confirm_button_template,
+                "landing_confirm",
+            ):
+                self._record_plane_action(plane_name, "landing", "select_stand_confirm")
+                return True
+
+            self._record_plane_action(plane_name, "landing", "stand_selected_confirm_not_found")
+            return False
+
+        # Case 2: direct clearance is available.
+        if self._click_template_named(
+            frame,
+            self.config.phase2.landing_clear_to_land_template,
+            "landing_clear_to_land",
+        ):
+            self._record_plane_action(plane_name, "landing", "clear_to_land")
+            return True
+
+        # No landing action state recognized.
+        clear_conf = self._best_conf_for_template(
+            frame,
+            self.config.phase2.landing_clear_to_land_template,
+        )
+        select_disabled_conf = self._best_conf_for_template(
+            frame,
+            self.config.phase2.landing_select_stand_disabled_template,
+        )
+        empty_conf = self._best_conf_for_template(
+            frame,
+            self.config.phase2.landing_empty_stand_card_template,
+        )
+        # Fallback: lower-left yellow action button, same position class as depart.
+        if (
+            self.config.phase2.depart_yellow_button_region_pct is not None
+            and self._click_yellow_button_in_region(frame, self.config.phase2.depart_yellow_button_region_pct)
+        ):
+            self._record_plane_action(plane_name, "landing", "clear_to_land_yellow_fallback")
+            return True
+
+        self._record_plane_action(
+            plane_name,
+            "landing",
+            (
+                "skip_no_landing_action "
+                f"clear_conf={clear_conf} "
+                f"select_disabled_conf={select_disabled_conf} "
+                f"empty_conf={empty_conf}"
+            ),
+        )
+        return False
+
+    def _handle_depart(self, frame: np.ndarray, plane_name: str) -> bool:
+        depart_tmpl = self.config.phase2.depart_execute_button_template
+        if depart_tmpl and depart_tmpl in self.templates:
+            if self._click_template_named(frame, depart_tmpl, "depart_execute"):
+                self._record_plane_action(plane_name, "depart", "execute_depart")
+                return True
+
+        if self.config.phase2.depart_yellow_button_region_pct is not None:
+            if self._click_yellow_button_in_region(
+                frame,
+                self.config.phase2.depart_yellow_button_region_pct,
+            ):
+                self._record_plane_action(plane_name, "depart", "execute_depart_yellow_button")
+                return True
+
+        self._record_plane_action(plane_name, "depart", "skip_no_depart_action")
+        return False
+
+    def _handle_category(
+        self,
+        frame: np.ndarray,
+        category_name: str,
+        category_cfg: Phase2CategoryConfig,
+    ) -> bool:
+        if not self._click_template_named(frame, category_cfg.tab_template, f"{category_name}_tab"):
+            return False
+
+        attempts = self._estimate_cards_per_category(self._capture_frame(), category_name)
+        attempts = max(1, attempts)
+        for _ in range(attempts):
+            frame = self._capture_frame()
+            if not self._select_next_card(frame, category_name, dry_run=False, log_prefix="[PHASE2]"):
+                break
+            time.sleep(self.config.phase2.inter_click_delay_sec)
+            frame = self._capture_frame()
+            plane_name = self._extract_plane_name(frame)
+            plane_model = self._extract_plane_model(frame)
+            self.current_plane_name = plane_name
+            self.current_plane_model = plane_model
+
+            if category_name == "processing" and self._handle_processing(frame, plane_name):
+                return True
+            if category_name == "landing" and self._handle_landing(frame, plane_name):
+                return True
+            if category_name == "depart" and self._handle_depart(frame, plane_name):
+                return True
+
+        self._log_debug(f"[PHASE2] no actionable {category_name} card in current sweep")
+        return False
+
+    def _phase2_setup(self, frame: np.ndarray) -> bool:
+        action_taken = False
+
+        if not self.phase2_grey_enabled:
+            if self.config.phase2.grey_mode_template in self.templates:
+                if self._click_template_named(frame, self.config.phase2.grey_mode_template, "grey_mode"):
+                    self.phase2_grey_enabled = True
+                    action_taken = True
+                    time.sleep(self.config.phase2.inter_click_delay_sec)
+                    frame = self._capture_frame()
+            else:
+                self._warn_missing_template_once(self.config.phase2.grey_mode_template)
+                self.phase2_grey_enabled = True
+
+        if not self.phase2_filter_enabled:
+            if (
+                self.config.phase2.filter_button_template in self.templates
+                and self._click_template_named(
+                    frame,
+                    self.config.phase2.filter_button_template,
+                    "filter_button",
+                )
+            ):
+                action_taken = True
+                time.sleep(self.config.phase2.inter_click_delay_sec)
+                frame = self._capture_frame()
+            elif self.config.phase2.filter_button_template not in self.templates:
+                self._warn_missing_template_once(self.config.phase2.filter_button_template)
+
+            if self.config.phase2.actionable_filter_template in self.templates:
+                if self._click_template_named(frame, self.config.phase2.actionable_filter_template, "actionable_filter"):
+                    self.phase2_filter_enabled = True
+                    action_taken = True
+                    time.sleep(self.config.phase2.inter_click_delay_sec)
+            else:
+                self._warn_missing_template_once(self.config.phase2.actionable_filter_template)
+                self.phase2_filter_enabled = True
+
+        return action_taken
+
+    def _run_phase2_cycle(self, frame: np.ndarray) -> bool:
+        if not self.config.phase2.enabled:
+            return False
+
+        if self._phase2_setup(frame):
+            return True
+
+        if self.config.phase2.test_mode:
+            any_action = False
+            categories: list[tuple[str, Phase2CategoryConfig]] = [
+                ("processing", self.config.phase2.processing),
+                ("landing", self.config.phase2.landing),
+                ("depart", self.config.phase2.depart),
+            ]
+
+            for name, cfg in categories:
+                frame = self._capture_frame()
+                tab_clicked = self._click_template_named(
+                    frame,
+                    cfg.tab_template,
+                    f"test_mode_{name}_tab",
+                    dry_run=False,
+                )
+                card_clicked = False
+                if tab_clicked:
+                    time.sleep(self.config.phase2.inter_click_delay_sec)
+                    card_clicked = self._test_mode_select_next_card(
+                        self._capture_frame(),
+                        name,
+                        dry_run=False,
+                    )
+                print(
+                    f"[PHASE2-TEST] category={name} tab_clicked={tab_clicked} card_clicked={card_clicked}"
+                )
+                any_action = any_action or tab_clicked or card_clicked
+                time.sleep(self.config.phase2.inter_click_delay_sec)
+
+            return any_action
+
+        any_action = False
+        frame = self._capture_frame()
+        any_action = self._handle_category(frame, "processing", self.config.phase2.processing) or any_action
+        time.sleep(self.config.phase2.inter_click_delay_sec)
+
+        frame = self._capture_frame()
+        any_action = self._handle_category(frame, "landing", self.config.phase2.landing) or any_action
+        time.sleep(self.config.phase2.inter_click_delay_sec)
+
+        frame = self._capture_frame()
+        any_action = self._handle_category(frame, "depart", self.config.phase2.depart) or any_action
+
+        if not any_action:
+            print("[PHASE2] no action performed in this cycle")
+        return any_action
+
+    def _estimate_cards_per_category(self, frame: np.ndarray, category: str) -> int:
+        region = self.config.phase2.card_list_region_pct
+        if region is None:
+            return 1
+        if self.config.phase2.card_key_icon_template:
+            icon_matches = self._find_template_matches_in_region(
+                frame,
+                self.config.phase2.card_key_icon_template,
+                region,
+            )
+            if icon_matches:
+                return len(icon_matches)
+        cards_per = int((1.0 - self.config.phase2.card_start_y_pct) / self.config.phase2.card_step_y_pct) + 1
+        return max(1, cards_per)
+
+    def _select_next_card(
+        self,
+        frame: np.ndarray,
+        category: str,
+        dry_run: bool = False,
+        log_prefix: str = "[PHASE2-TEST]",
+    ) -> bool:
+        region = self.config.phase2.card_list_region_pct
+        if region is None:
+            self._warn_missing_template_once("phase2.card_list_region_pct")
+            return False
+
+        if self.config.phase2.card_key_icon_template:
+            icon_matches = self._find_template_matches_in_region(
+                frame,
+                self.config.phase2.card_key_icon_template,
+                region,
+            )
+            if icon_matches:
+                cursor = self.phase2_test_mode_card_index.get(category, 0)
+                slot = cursor % len(icon_matches)
+                picked = icon_matches[slot]
+                if dry_run:
+                    tx, ty = self._resolve_match_center(frame, picked)
+                else:
+                    tx, ty = self._tap_match_center(
+                        frame,
+                        picked,
+                        debug_label=f"card_select_icon_{category}",
+                    )
+                self.phase2_test_mode_card_index[category] = cursor + 1
+                time.sleep(0.2)
+                print(
+                    f"{log_prefix} select_card category={category} mode=icon "
+                    f"slot={slot}/{len(icon_matches)} tap=({tx},{ty}) "
+                    f"icon_conf={picked.confidence:.3f}"
+                )
+                return True
+            # Icon mode is configured; no icons means no visible actionable cards.
+            return False
+
+        # Auto-compute visible slots from start+step geometry.
+        cards_per = int((1.0 - self.config.phase2.card_start_y_pct) / self.config.phase2.card_step_y_pct) + 1
+        cards_per = max(1, cards_per)
+        cursor = self.phase2_test_mode_card_index.get(category, 0)
+        slot = cursor % cards_per
+        local_y = (
+            self.config.phase2.card_start_y_pct
+            + slot * self.config.phase2.card_step_y_pct
+        )
+        if local_y > 0.98:
+            local_y = 0.98
+
+        x_pct = region.x + region.w * self.config.phase2.card_anchor_x_pct
+        y_pct = region.y + region.h * local_y
+        x, y = self._to_abs_xy(frame, x_pct, y_pct)
+        tx, ty = self._tap_abs(
+            frame,
+            x,
+            y,
+            do_tap=not dry_run,
+            debug_label=f"card_select_grid_{category}",
+        )
+        self.phase2_test_mode_card_index[category] = cursor + 1
+        time.sleep(0.2)
+        print(
+            f"{log_prefix} select_card category={category} mode=grid slot={slot} "
+            f"tap=({tx},{ty}) x_pct={x_pct:.3f} y_pct={y_pct:.3f}"
+        )
+        return True
+
+    def _test_mode_select_next_card(self, frame: np.ndarray, category: str, dry_run: bool = False) -> bool:
+        return self._select_next_card(
+            frame,
+            category,
+            dry_run=dry_run,
+            log_prefix="[PHASE2-TEST]",
+        )
+
+    def _find_template_matches_in_region(
+        self,
+        frame: np.ndarray,
+        template_name: str,
+        region: RectPctConfig,
+    ) -> list[MatchResult]:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return []
+
+        crop, ox, oy = self._crop_by_rect_pct(frame, region)
+        ch, cw = crop.shape[:2]
+        th, tw = tmpl.image.shape[:2]
+        if ch < th or cw < tw:
+            return []
+
+        result = cv2.matchTemplate(crop, tmpl.image, cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(result >= tmpl.threshold)
+
+        candidates: list[MatchResult] = []
+        for y, x in zip(ys.tolist(), xs.tolist()):
+            conf = float(result[y, x])
+            candidates.append(
+                MatchResult(
+                    name=template_name,
+                    confidence=conf,
+                    x=ox + int(x),
+                    y=oy + int(y),
+                    w=int(tw),
+                    h=int(th),
+                )
+            )
+
+        candidates.sort(key=lambda m: m.confidence, reverse=True)
+
+        selected: list[MatchResult] = []
+        min_dist = max(tw, th) * 0.7
+        min_dist_sq = min_dist * min_dist
+        for m in candidates:
+            cx = m.x + m.w / 2.0
+            cy = m.y + m.h / 2.0
+            keep = True
+            for s in selected:
+                sx = s.x + s.w / 2.0
+                sy = s.y + s.h / 2.0
+                dx = cx - sx
+                dy = cy - sy
+                if (dx * dx + dy * dy) < min_dist_sq:
+                    keep = False
+                    break
+            if keep:
+                selected.append(m)
+
+        selected.sort(key=lambda m: (m.y, m.x))
+        return selected
+
     def step(self) -> bool:
-        frame = self._decode_frame(self.adb.screenshot_png_bytes())
+        frame = self._capture_frame()
 
         if self.startup_index < len(self.config.startup_flow):
+            self._next_sleep_override_sec = None
             return self._run_startup_flow_step(frame)
 
-        print("[INFO] Startup flow complete. Add post-start logic in step().")
-        return False
+        if not self.phase2_started:
+            self.phase2_started = True
+            if self.config.phase2.post_start_delay_sec > 0:
+                time.sleep(self.config.phase2.post_start_delay_sec)
+
+        action_performed = self._run_phase2_cycle(frame)
+        if not self.phase2_first_cycle_done:
+            # Warmup: avoid immediate long idle sleep on the first no-action sweep
+            # right after entering game.
+            self._next_sleep_override_sec = self.config.phase2.action_cycle_delay_sec
+            self.phase2_first_cycle_done = True
+        else:
+            self._next_sleep_override_sec = (
+                self.config.phase2.action_cycle_delay_sec
+                if action_performed
+                else self.config.phase2.idle_cycle_delay_sec
+            )
+        return action_performed
 
     def run(self) -> None:
         print("[INFO] Starting bot loop. Press Ctrl+C to stop.")
@@ -258,9 +1507,10 @@ class GameBot:
             try:
                 self.step()
             except Exception as exc:
-                print(f"[ERROR] {exc}")
+                self._log_error(str(exc))
 
-            sleep_time = self.config.loop_interval_sec + random.uniform(
-                0, self.config.jitter_sec
-            )
+            if self._next_sleep_override_sec is not None:
+                sleep_time = self._next_sleep_override_sec
+            else:
+                sleep_time = self.config.loop_interval_sec + random.uniform(0, self.config.jitter_sec)
             time.sleep(max(0.05, sleep_time))

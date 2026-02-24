@@ -3,6 +3,7 @@ serial: ""
 loop_interval_sec: 1.0
 jitter_sec: 0.2
 screenshot_dir: logs/screens
+debug_logging: false
 save_debug_screenshots: false
 
 templates:
@@ -11,32 +12,237 @@ templates:
     threshold: 0.92
     action:
       type: tap_center
+      tap_offset_x: 0
+      tap_offset_y: 0
 
   - name: play_button
     path: templates/play_button.png
-    threshold: 0.92
+    threshold: 0.75
     action:
       type: tap_center
+      tap_offset_x: 0
+      tap_offset_y: 0
+
+  - name: grey_mode_button
+    path: templates/grey_mode_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+  - name: filter_button
+    path: templates/filter_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+  - name: actionable_filter_button
+    path: templates/actionable_filter_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+  - name: processing_tab_button
+    path: templates/processing_tab_button.png
+    threshold: 0.80
+    action:
+      type: tap_center
+
+  - name: landing_tab_button
+    path: templates/landing_tab_button.png
+    threshold: 0.80
+    action:
+      type: tap_center
+
+  - name: depart_tab_button
+    path: templates/depart_tab_button.png
+    threshold: 0.80
+    action:
+      type: tap_center
+
+  - name: card_alert_icon
+    path: templates/card_alert_icon.png
+    threshold: 0.88
+    action:
+      type: tap_center
+
+  - name: landing_clear_to_land_button
+    path: templates/landing_clear_to_land_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+  - name: landing_select_stand_disabled_button
+    path: templates/landing_select_stand_disabled_button.png
+    threshold: 0.88
+    action:
+      type: tap_center
+
+  - name: landing_empty_stand_option
+    path: templates/landing_empty_stand_option.png
+    threshold: 0.88
+    action:
+      type: tap_center
+
+  - name: landing_confirm_button
+    path: templates/landing_confirm_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+
+  - name: processing_finish_handling_button
+    path: templates/processing_finish_handling_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+  - name: processing_claim_rewards_button
+    path: templates/processing_claim_rewards_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+
+  - name: processing_claim_rewards_popup_confirm_button
+    path: templates/processing_claim_rewards_popup_confirm_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+  - name: processing_claim_reward_popup_button
+    path: templates/processing_claim_reward_popup_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
+
+  - name: processing_not_enough_crew_message
+    path: templates/processing_not_enough_crew_message.png
+    threshold: 0.70
+    action:
+      type: tap_center
+
+  - name: processing_assign_crew_disabled_button
+    path: templates/processing_assign_crew_disabled_button.png
+    threshold: 0.88
+    action:
+      type: tap_center
+
+  - name: processing_add_enabled_button
+    path: templates/processing_add_enabled_button.png
+    threshold: 0.88
+    action:
+      type: tap_center
+
+  - name: processing_add_disabled_button
+    path: templates/processing_add_disabled_button.png
+    threshold: 0.88
+    action:
+      type: tap_center
+
+
+  - name: processing_ramp_agent_toggle_button
+    path: templates/processing_ramp_agent_toggle_button.png
+    threshold: 0.88
+    action:
+      type: tap_center
+
+  - name: processing_start_handling_button
+    path: templates/processing_start_handling_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
 
 startup_flow:
   - type: click_template
     template: start_button
 
-  - type: pick_airport_text
-    target_text: INN
-    min_ocr_confidence: 55
+  - type: pick_airport_image
+    image: airport_inn.png
+    image_threshold: 0.70
     max_scrolls: 8
-    ocr_region_pct:
-      x: 0.78
-      y: 0.12
-      w: 0.20
-      h: 0.78
+    swipe_scale: 0.45
     swipe_pct:
       x1: 0.88
-      y1: 0.86
+      y1: 0.28
       x2: 0.88
-      y2: 0.28
+      y2: 0.86
       duration_ms: 220
 
   - type: click_template
     template: play_button
+
+phase2:
+  enabled: true
+  test_mode: false
+  post_start_delay_sec: 2.0
+  inter_click_delay_sec: 0.3
+  action_cycle_delay_sec: 2.0
+  idle_cycle_delay_sec: 5.0
+  card_key_icon_template: card_alert_icon
+  card_list_region_pct:
+    x: 0.82
+    y: 0.02
+    w: 0.16
+    h: 0.30
+  card_anchor_x_pct: 0.42
+  card_start_y_pct: 0.18
+  card_step_y_pct: 0.33
+
+  grey_mode_template: grey_mode_button
+  filter_button_template: filter_button
+  actionable_filter_template: actionable_filter_button
+
+  processing:
+    tab_template: processing_tab_button
+
+  landing:
+    tab_template: landing_tab_button
+
+  depart:
+    tab_template: depart_tab_button
+
+  processing_claim_rewards_template: processing_claim_rewards_button
+  processing_finish_handling_template: processing_finish_handling_button
+  processing_claim_rewards_popup_confirm_template: processing_claim_rewards_popup_confirm_button
+  processing_claim_reward_popup_template: processing_claim_reward_popup_button
+  processing_not_enough_message_template: processing_not_enough_crew_message
+  processing_assign_crew_disabled_template: processing_assign_crew_disabled_button
+  processing_add_enabled_template: processing_add_enabled_button
+  processing_add_disabled_template: processing_add_disabled_button
+  processing_toggle_button_template: processing_ramp_agent_toggle_button
+  processing_start_handling_template: processing_start_handling_button
+  processing_max_add_clicks: 12
+  landing_clear_to_land_template: landing_clear_to_land_button
+  landing_select_stand_disabled_template: landing_select_stand_disabled_button
+  landing_empty_stand_card_template: landing_empty_stand_option
+  landing_confirm_button_template: landing_confirm_button
+  depart_execute_button_template: depart_execute_button
+  depart_yellow_button_region_pct:
+    x: 0.02
+    y: 0.72
+    w: 0.24
+    h: 0.24
+
+  # Optional OCR regions (0-1 percentages) for enhanced logic/logging.
+  plane_name_region_pct:
+    x: 0.012
+    y: 0.382
+    w: 0.076
+    h: 0.068
+  plane_model_region_pct:
+    x: 0.074
+    y: 0.382
+    w: 0.072
+    h: 0.068
+  # crew_available_region_pct:
+  #   x: 0.42
+  #   y: 0.70
+  #   w: 0.06
+  #   h: 0.04
+  # crew_required_region_pct:
+  #   x: 0.52
+  #   y: 0.70
+  #   w: 0.06
+  #   h: 0.04
