@@ -1,4 +1,4 @@
-# WOABot (macOS + Android Emulator via ADB)# WOABot (macOS + Android Emulator via ADB)
+# WOABot (macOS + Android Emulator via ADB)
 
 Automation bot for World of Airports running on an Android emulator.
 
@@ -8,6 +8,10 @@ Note:
 High-level flow:
 - Phase 1: enter game (`start -> select airport -> play`)
 - Phase 2: loop categories (`processing -> landing -> depart`)
+
+## Quick Demo
+
+![WOABot demo](docs/demo.gif)
 
 ## Requirements
 
