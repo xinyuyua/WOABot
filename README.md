@@ -1,10 +1,21 @@
-# ADB Game Bot Skeleton (macOS + Android Emulator)
+# WOABot (macOS + Android Emulator via ADB)
 
-Two-phase automation structure:
-- Phase 1: startup flow (`start -> airport -> play`)
-- Phase 2: in-game action loop (`processing -> landing -> depart`)
+Automation bot for World of Airports running on an Android emulator.
 
-## Setup
+High-level flow:
+- Phase 1: enter game (`start -> select airport -> play`)
+- Phase 2: loop categories (`processing -> landing -> depart`)
+
+## Requirements
+
+- macOS
+- Python 3.12+ (or compatible Python 3)
+- Android emulator with ADB access
+- Tesseract OCR
+
+## 1) Install dependencies
+
+From `/Users/xinyuyuan/workspace/CodeX/WOAbot`:
 
 ```bash
 python3 -m venv .venv
@@ -13,72 +24,125 @@ pip install -r requirements.txt
 brew install tesseract
 ```
 
-## Run
+## 2) Install/verify ADB
+
+If `adb` is missing:
 
 ```bash
-python run_bot.py --config config.yaml
+brew install android-platform-tools
 ```
 
-## Config model
+Verify device/emulator:
 
-Main file: `/Users/xinyuyuan/workspace/CodeX/WOAbot/config.yaml`
+```bash
+adb devices
+```
 
-Sections:
-- `templates`: all matchable UI elements and thresholds
-- `startup_flow`: launch sequence
-- `phase2`: in-game loop behavior and template mappings
+You should see at least one `device`.
 
-## Phase 2 behavior
+Quick screenshot sanity check:
 
-`phase2.test_mode: true` behavior:
-- Refresh actionable filter
-- Cycle tabs only: `processing -> landing -> depart`
-- Optional card loop mode: click card slots one-by-one in configured list region
-- No execution actions
+```bash
+adb exec-out screencap -p > /tmp/screen.png
+ls -lh /tmp/screen.png
+```
 
-`phase2.test_mode: false` behavior:
-1. Ensure grey mode is enabled.
-2. Click filter button to open filter panel.
-3. Ensure actionable filter is enabled.
-4. Try `processing` category.
-5. Try `landing` category.
-6. Try `depart` category.
+## 3) Configure bot
 
-Timing:
-- One-time delay after startup enters game: `phase2.post_start_delay_sec` (default `2.0`)
-- Delay between setup/category clicks: `phase2.inter_click_delay_sec` (default `0.3`)
-- If any action happened while sweeping all categories: sleep `phase2.action_cycle_delay_sec` (default `2.0`)
-- If no category action happened: sleep `phase2.idle_cycle_delay_sec` (default `5.0`)
+Main config:
+- `/Users/xinyuyuan/workspace/CodeX/WOAbot/config.yaml`
 
-Logs:
-- `[PHASE2]` for category/button actions
-- `[PHASE2-TEST]` for test-mode category loop traces
-- `[PLANE]` for plane-level action records
-- `[TRACE]` and `[DEBUG]` for matching diagnostics
+Main sections:
+- `templates`: template image list, threshold, tap action
+- `startup_flow`: startup sequence
+- `phase2`: runtime loop behavior
 
-Landing flow (real mode):
-- Case 1: `landing_clear_to_land_button` visible -> click it.
-- Case 2: `landing_select_stand_disabled_button` / stand selection shown:
-  click `landing_empty_stand_option`, then click `landing_confirm_button`.
+Important flags:
+- `debug_logging`: verbose debug logs (`true`/`false`)
+- `save_debug_screenshots`: save action screenshots (`true`/`false`)
+- `phase2.test_mode`: tab/card loop test only (`true`) vs real actions (`false`)
 
-Test mode card loop tuning:
-- `phase2.card_key_icon_template`: optional template name for icon-driven card detection (for example yellow `!`, default `card_alert_icon`)
-- `phase2.card_list_region_pct`: panel region for card list
-- visible card count is auto-derived from start/step values
-- `phase2.card_anchor_x_pct`: horizontal click anchor inside region
-- `phase2.card_start_y_pct`: first slot vertical position (region-local)
-- `phase2.card_step_y_pct`: vertical distance between slots
+### Template naming for incorrect enabled filters
 
-## Notes
+You can add templates like:
+- `button_enabled_incorrect_1`
+- `button_enabled_incorrect_2`
+- `button_enabled_incorrect_3`
 
-- Plane memory is tracked in-process (`name -> last category/action/time`) for future expansion.
-- Crew number logic uses optional OCR regions if configured under `phase2`.
+Bot will auto-detect names matching `button_enabled_incorrect_<N>` and click them off between category loops.
 
+Optional explicit list:
+- `phase2.incorrect_enabled_templates`
+- `phase2.incorrect_enabled_max_passes`
 
-Depart fallback:
-- If template action is missing, detect any yellow button in `phase2.depart_yellow_button_region_pct` and click it.
+## 4) Run
 
-Processing flow (real mode):
-- Case 1: `processing_claim_rewards_button` visible -> click it.
-- Case 2: `processing_assign_crew_disabled_button` visible ->
-  click `processing_add_enabled_button` until disabled, click `processing_ramp_agent_toggle_button`, then click `processing_start_handling_button`.
+```bash
+source .venv/bin/activate
+python3 run_bot.py --config config.yaml
+```
+
+Stop with `Ctrl+C`.
+
+## Current behavior summary
+
+### Phase 1
+- Click `start_button`
+- Find and select airport (image/text flow configured in `startup_flow`)
+- Click `play_button`
+
+### Phase 2 setup
+- Click grey mode
+- Click filter button
+- Click actionable filter
+
+### Phase 2 categories
+
+Processing:
+- `processing_finish_handling_button` -> click
+- `processing_claim_rewards_button` -> click
+  - then checks popup buttons:
+    - `processing_claim_rewards_popup_confirm_button`
+    - `processing_claim_reward_popup_button`
+- Assign-crew case:
+  - click add first
+  - if `processing_not_enough_crew_message` appears before toggle, skip this card
+  - else toggle ramp agent, then click start handling
+
+Landing:
+- If stand selection state is detected:
+  - click leftmost `landing_empty_stand_option`
+  - click `landing_confirm_button`
+- Otherwise click `landing_clear_to_land_button` (or yellow fallback region)
+
+Depart:
+- Click `depart_execute_button_template` if available
+- Else click yellow button in `phase2.depart_yellow_button_region_pct`
+
+## OCR notes
+
+Bot supports OCR for:
+- `plane_name_region_pct`
+- `plane_model_region_pct`
+
+Tune these rectangles in `config.yaml` if plane name/model extraction is unstable.
+
+## Logs
+
+- `[PLANE]`: per-plane action log
+- `[PHASE2]`: category/action flow
+- `[PHASE2-TEST]`: test mode flow
+- `[WARN]`, `[ERROR]`, `[FAIL]`: warning/error/failure paths
+- `[DEBUG]`: debug-only messages (`debug_logging: true`)
+
+## Troubleshooting
+
+- `Screenshot bytes are empty or not a valid PNG stream`:
+  - verify `adb devices`
+  - run `adb exec-out screencap -p > /tmp/screen.png`
+- OCR not detecting expected text:
+  - enable `debug_logging: true`
+  - tune OCR region rectangles in `phase2`
+- Wrong taps:
+  - re-capture/update template PNGs
+  - adjust template thresholds in `config.yaml`
