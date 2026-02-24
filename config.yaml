@@ -44,19 +44,19 @@ templates:
 
   - name: processing_tab_button
     path: templates/processing_tab_button.png
-    threshold: 0.85
+    threshold: 0.90
     action:
       type: tap_center
 
   - name: landing_tab_button
     path: templates/landing_tab_button.png
-    threshold: 0.85
+    threshold: 0.90
     action:
       type: tap_center
 
   - name: depart_tab_button
     path: templates/depart_tab_button.png
-    threshold: 0.85
+    threshold: 0.90
     action:
       type: tap_center
 

@@ -15,6 +15,7 @@ from .config import ActionConfig, BotConfig, FlowStepConfig, Phase2CategoryConfi
 from .detector import MatchResult, Template, load_template, match_template
 
 ANSI_RED = "\033[31m"
+ANSI_GREEN = "\033[32m"
 ANSI_RESET = "\033[0m"
 
 
@@ -514,13 +515,14 @@ class GameBot:
         template_name: str,
         tag: str,
         dry_run: bool = False,
+        allow_cache: bool = True,
     ) -> bool:
         tmpl = self.templates.get(template_name)
         if tmpl is None:
             self._warn_missing_template_once(template_name)
             return False
 
-        if not dry_run and self._is_static_cached_template(template_name):
+        if allow_cache and not dry_run and self._is_static_cached_template(template_name):
             cached = self.button_tap_cache_px.get(template_name)
             if cached is not None:
                 cx, cy = cached
@@ -587,6 +589,17 @@ class GameBot:
                 )
             self._update_shared_action_button_region(frame, template_name, match)
         return True
+
+    def _actionable_filter_guard_y(self, frame: np.ndarray) -> int | None:
+        actionable_tmpl = self.config.phase2.actionable_filter_template
+        cached = self.button_tap_cache_px.get(actionable_tmpl)
+        if cached is not None:
+            return cached[1]
+        match = self._match_template_named(frame, actionable_tmpl)
+        if match is None:
+            return None
+        _, cy = self._resolve_match_center(frame, match)
+        return cy
 
     def _click_leftmost_template_named(
         self,
@@ -775,74 +788,95 @@ class GameBot:
         if rect is None:
             return "unknown"
         crop, _, _ = self._crop_by_rect_pct(frame, rect)
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        enlarged = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        thresh = cv2.adaptiveThreshold(
-            enlarged,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            31,
-            5,
-        )
-        inverted = cv2.bitwise_not(thresh)
-        variants = [enlarged, thresh, inverted]
-        ocr_cfgs = [
-            "--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-",
-            "--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-",
-        ]
-        candidates: list[str] = []
-        try:
-            for img in variants:
-                for cfg in ocr_cfgs:
-                    txt = pytesseract.image_to_string(img, config=cfg).upper().strip()
-                    txt = re.sub(r"[^A-Z0-9-]", "", txt)
-                    if txt:
-                        candidates.append(txt)
-        except pytesseract.TesseractNotFoundError as exc:
-            raise RuntimeError("Tesseract OCR is not installed. Run `brew install tesseract`.") from exc
+        ch, cw = crop.shape[:2]
+        if ch < 3 or cw < 3:
+            return "unknown"
+        # Use only the upper part where the ID text is rendered (avoid country/flag row noise).
+        crop = crop[: max(1, int(ch * 0.62)), :]
 
-        if self.config.debug_logging and candidates:
-            print(f"[OCR] plane_name_candidates={candidates[:6]}")
+        candidates = self._ocr_candidates(crop, allow_hyphen=True)
+        if not candidates:
+            return "unknown"
 
-        # Merge split OCR tokens when name is broken into alpha/numeric pieces:
-        # e.g. "ENO" + "011" -> "ENO011".
-        alpha_tokens = [t for t in candidates if re.fullmatch(r"[A-Z]{2,5}", t)]
-        digit_tokens = [t for t in candidates if re.fullmatch(r"\d{2,5}", t)]
-        merged: list[str] = []
-        for a in alpha_tokens[:4]:
-            for d in digit_tokens[:4]:
-                merged.append(f"{a}{d}")
-                merged.append(f"{a}-{d}")
+        if self.config.debug_logging:
+            preview = [f"{t}:{c:.0f}" for t, c in candidates[:8]]
+            print(f"[OCR] plane_name_candidates={preview}")
+
+        # Merge common split pattern: "OS" + "1038" => "OS1038" and "OS-1038".
+        alpha_tokens = [t for t, _ in candidates if re.fullmatch(r"[A-Z]{1,5}", t)]
+        digit_tokens = [t for t, _ in candidates if re.fullmatch(r"\d{2,6}", t)]
+        merged: list[tuple[str, float]] = []
+        for a in alpha_tokens[:6]:
+            for d in digit_tokens[:6]:
+                merged.append((f"{a}{d}", 65.0))
+                merged.append((f"{a}-{d}", 64.0))
         candidates.extend(merged)
 
-        uniq: list[str] = []
-        for txt in candidates:
-            if txt not in uniq:
-                uniq.append(txt)
-        if uniq:
-            # Prefer alnum-mixed identifiers first (most common for flight IDs),
-            # then dashed forms, then longer tokens.
-            uniq.sort(
-                key=lambda s: (
-                    1 if (re.search(r"[A-Z]", s) and re.search(r"\d", s)) else 0,
-                    1 if ("-" in s and re.search(r"[A-Z]", s) and re.search(r"\d", s)) else 0,
-                    len(s),
-                ),
-                reverse=True,
-            )
-            return uniq[0]
-        return "unknown"
+        best_token = "unknown"
+        best_score = float("-inf")
+        seen: set[str] = set()
+        for token, conf in candidates:
+            if token in seen:
+                continue
+            seen.add(token)
+            has_alpha = bool(re.search(r"[A-Z]", token))
+            has_digit = bool(re.search(r"\d", token))
+            score = conf
+            score += min(len(token), 8) * 2.0
+            if has_alpha and has_digit:
+                score += 20.0
+            if "-" in token:
+                score += 2.0
+            if len(token) <= 1:
+                score -= 40.0
+            if score > best_score:
+                best_score = score
+                best_token = token
+        return best_token
 
     def _extract_plane_model(self, frame: np.ndarray) -> str:
         rect = self.config.phase2.plane_model_region_pct
         if rect is None:
             return "unknown"
         crop, _, _ = self._crop_by_rect_pct(frame, rect)
+        ch, cw = crop.shape[:2]
+        if ch < 3 or cw < 3:
+            return "unknown"
+        # Use upper band to focus on model text and avoid lower icons.
+        crop = crop[: max(1, int(ch * 0.62)), :]
+
+        candidates = self._ocr_candidates(crop, allow_hyphen=False)
+        if not candidates:
+            return "unknown"
+
+        if self.config.debug_logging:
+            preview = [f"{t}:{c:.0f}" for t, c in candidates[:8]]
+            print(f"[OCR] plane_model_candidates={preview}")
+
+        best_token = "unknown"
+        best_score = float("-inf")
+        seen: set[str] = set()
+        for token, conf in candidates:
+            if token in seen:
+                continue
+            seen.add(token)
+            has_alpha = bool(re.search(r"[A-Z]", token))
+            has_digit = bool(re.search(r"\d", token))
+            score = conf
+            score += min(len(token), 8) * 2.0
+            if has_alpha and has_digit:
+                score += 18.0
+            if len(token) < 2:
+                score -= 30.0
+            if score > best_score:
+                best_score = score
+                best_token = token
+        return best_token
+
+    def _ocr_candidates(self, crop: np.ndarray, allow_hyphen: bool) -> list[tuple[str, float]]:
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        enlarged = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        enlarged = cv2.resize(gray, None, fx=2.2, fy=2.2, interpolation=cv2.INTER_CUBIC)
         thresh = cv2.adaptiveThreshold(
             enlarged,
             255,
@@ -852,34 +886,45 @@ class GameBot:
             5,
         )
         inverted = cv2.bitwise_not(thresh)
-        variants = [enlarged, thresh, inverted]
-        ocr_cfgs = [
-            "--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-            "--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        ]
-        candidates: list[str] = []
+        otsu = cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        variants = [enlarged, thresh, inverted, otsu]
+        whitelist = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" if allow_hyphen else "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        norm_pattern = r"[^A-Z0-9-]" if allow_hyphen else r"[^A-Z0-9]"
+
+        raw_candidates: list[tuple[str, float]] = []
         try:
             for img in variants:
-                for cfg in ocr_cfgs:
-                    txt = pytesseract.image_to_string(img, config=cfg).upper().strip()
-                    txt = re.sub(r"[^A-Z0-9]", "", txt)
-                    if txt:
-                        candidates.append(txt)
+                for psm in (6, 7, 8, 11):
+                    cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={whitelist}"
+                    data = pytesseract.image_to_data(
+                        img,
+                        output_type=pytesseract.Output.DICT,
+                        config=cfg,
+                    )
+                    for i, raw in enumerate(data.get("text", [])):
+                        txt = raw.strip().upper()
+                        if not txt:
+                            continue
+                        txt = re.sub(norm_pattern, "", txt)
+                        if not txt:
+                            continue
+                        try:
+                            conf = float(data["conf"][i])
+                        except ValueError:
+                            conf = 0.0
+                        if conf < 20:
+                            continue
+                        raw_candidates.append((txt, conf))
         except pytesseract.TesseractNotFoundError as exc:
             raise RuntimeError("Tesseract OCR is not installed. Run `brew install tesseract`.") from exc
 
-        if self.config.debug_logging and candidates:
-            print(f"[OCR] plane_model_candidates={candidates[:6]}")
-
-        uniq: list[str] = []
-        for txt in candidates:
-            if txt not in uniq:
-                uniq.append(txt)
-        if uniq:
-            # Prefer tokens with letters, then by length.
-            uniq.sort(key=lambda s: (1 if re.search(r"[A-Z]", s) else 0, len(s)), reverse=True)
-            return uniq[0]
-        return "unknown"
+        by_token: dict[str, float] = {}
+        for token, conf in raw_candidates:
+            prev = by_token.get(token)
+            if prev is None or conf > prev:
+                by_token[token] = conf
+        ranked = sorted(by_token.items(), key=lambda x: x[1], reverse=True)
+        return ranked
 
     def _extract_crew_counts(self, frame: np.ndarray) -> tuple[int | None, int | None]:
         available_rect = self.config.phase2.crew_available_region_pct
@@ -908,7 +953,10 @@ class GameBot:
             last_action=action,
             last_seen_epoch_ms=now_ms,
         )
-        print(f"[PLANE] name='{name}' model='{model}' category={category} action={action}")
+        print(
+            f"{ANSI_GREEN}[PLANE]{ANSI_RESET} "
+            f"name='{name}' model='{model}' category={category} action={action}"
+        )
         normalized = action.lower()
         if normalized.startswith("skip_"):
             return
@@ -923,14 +971,14 @@ class GameBot:
                 f"plane_action_failure name='{name}' model='{model}' category={category} action={action}"
             )
 
-    def _handle_processing(self, frame: np.ndarray, plane_name: str) -> bool:
+    def _handle_processing(self, frame: np.ndarray, plane_name: str, plane_model: str) -> bool:
         # Edge case: finish handling is available.
         if self._click_template_named(
             frame,
             self.config.phase2.processing_finish_handling_template,
             "processing_finish_handling",
         ):
-            self._record_plane_action(plane_name, "processing", "finish_handling")
+            self._record_plane_action(plane_name, "processing", "finish_handling", plane_model)
             return True
 
         # Case 1: claim rewards is available.
@@ -963,6 +1011,7 @@ class GameBot:
                 plane_name,
                 "processing",
                 f"claim_rewards popup_confirm={popup_clicked}",
+                plane_model,
             )
             return True
 
@@ -972,7 +1021,7 @@ class GameBot:
             self.config.phase2.processing_assign_crew_disabled_template,
         )
         if not assign_crew_disabled:
-            self._record_plane_action(plane_name, "processing", "skip_no_processing_action")
+            self._record_plane_action(plane_name, "processing", "skip_no_processing_action", plane_model)
             return False
 
         # Case 2: assign crew disabled -> click add first -> if not enough before toggle, skip -> then toggle -> start handling.
@@ -1042,6 +1091,7 @@ class GameBot:
                 plane_name,
                 "processing",
                 f"skip_not_enough_after_add add_clicks={add_clicks} toggled={toggled}",
+                plane_model,
             )
             return False
 
@@ -1054,6 +1104,7 @@ class GameBot:
                 plane_name,
                 "processing",
                 f"skip_not_enough_before_toggle add_clicks={add_clicks} toggled={toggled}",
+                plane_model,
             )
             return False
 
@@ -1078,6 +1129,7 @@ class GameBot:
                 plane_name,
                 "processing",
                 f"assign_crew_started add_clicks={add_clicks} toggled={toggled} reason={add_loop_reason}",
+                plane_model,
             )
             return True
 
@@ -1085,6 +1137,7 @@ class GameBot:
             plane_name,
             "processing",
             f"assign_crew_not_started add_clicks={add_clicks} toggled={toggled} reason={add_loop_reason}",
+            plane_model,
         )
         if add_clicks == 0:
             add_enabled_conf = self._best_conf_for_template(
@@ -1101,7 +1154,7 @@ class GameBot:
             )
         return add_clicks > 0 or toggled
 
-    def _handle_landing(self, frame: np.ndarray, plane_name: str) -> bool:
+    def _handle_landing(self, frame: np.ndarray, plane_name: str, plane_model: str) -> bool:
         # Case 1: stand selection flow (priority to avoid false clear-to-land hits).
         frame = self._capture_frame()
         stand_selection_needed = (
@@ -1124,7 +1177,7 @@ class GameBot:
                 )
 
             if not empty_clicked:
-                self._record_plane_action(plane_name, "landing", "stand_selection_no_empty_card")
+                self._record_plane_action(plane_name, "landing", "stand_selection_no_empty_card", plane_model)
                 return False
 
             self._sleep(0.15)
@@ -1134,10 +1187,10 @@ class GameBot:
                 self.config.phase2.landing_confirm_button_template,
                 "landing_confirm",
             ):
-                self._record_plane_action(plane_name, "landing", "select_stand_confirm")
+                self._record_plane_action(plane_name, "landing", "select_stand_confirm", plane_model)
                 return True
 
-            self._record_plane_action(plane_name, "landing", "stand_selected_confirm_not_found")
+            self._record_plane_action(plane_name, "landing", "stand_selected_confirm_not_found", plane_model)
             return False
 
         # Case 2: direct clearance is available.
@@ -1146,7 +1199,7 @@ class GameBot:
             self.config.phase2.landing_clear_to_land_template,
             "landing_clear_to_land",
         ):
-            self._record_plane_action(plane_name, "landing", "clear_to_land")
+            self._record_plane_action(plane_name, "landing", "clear_to_land", plane_model)
             return True
 
         # No landing action state recognized.
@@ -1167,7 +1220,7 @@ class GameBot:
             self.config.phase2.depart_yellow_button_region_pct is not None
             and self._click_yellow_button_in_region(frame, self.config.phase2.depart_yellow_button_region_pct)
         ):
-            self._record_plane_action(plane_name, "landing", "clear_to_land_yellow_fallback")
+            self._record_plane_action(plane_name, "landing", "clear_to_land_yellow_fallback", plane_model)
             return True
 
         self._record_plane_action(
@@ -1179,14 +1232,15 @@ class GameBot:
                 f"select_disabled_conf={select_disabled_conf} "
                 f"empty_conf={empty_conf}"
             ),
+            plane_model,
         )
         return False
 
-    def _handle_depart(self, frame: np.ndarray, plane_name: str) -> bool:
+    def _handle_depart(self, frame: np.ndarray, plane_name: str, plane_model: str) -> bool:
         depart_tmpl = self.config.phase2.depart_execute_button_template
         if depart_tmpl and depart_tmpl in self.templates:
             if self._click_template_named(frame, depart_tmpl, "depart_execute"):
-                self._record_plane_action(plane_name, "depart", "execute_depart")
+                self._record_plane_action(plane_name, "depart", "execute_depart", plane_model)
                 return True
 
         if self.config.phase2.depart_yellow_button_region_pct is not None:
@@ -1194,10 +1248,10 @@ class GameBot:
                 frame,
                 self.config.phase2.depart_yellow_button_region_pct,
             ):
-                self._record_plane_action(plane_name, "depart", "execute_depart_yellow_button")
+                self._record_plane_action(plane_name, "depart", "execute_depart_yellow_button", plane_model)
                 return True
 
-        self._record_plane_action(plane_name, "depart", "skip_no_depart_action")
+        self._record_plane_action(plane_name, "depart", "skip_no_depart_action", plane_model)
         return False
 
     def _handle_category(
@@ -1222,11 +1276,11 @@ class GameBot:
             self.current_plane_name = plane_name
             self.current_plane_model = plane_model
 
-            if category_name == "processing" and self._handle_processing(frame, plane_name):
+            if category_name == "processing" and self._handle_processing(frame, plane_name, plane_model):
                 return True
-            if category_name == "landing" and self._handle_landing(frame, plane_name):
+            if category_name == "landing" and self._handle_landing(frame, plane_name, plane_model):
                 return True
-            if category_name == "depart" and self._handle_depart(frame, plane_name):
+            if category_name == "depart" and self._handle_depart(frame, plane_name, plane_model):
                 return True
 
         self._log_debug(f"[PHASE2] no actionable {category_name} card in current sweep")
@@ -1253,10 +1307,25 @@ class GameBot:
         for _ in range(self.config.phase2.incorrect_enabled_max_passes):
             clicked_in_pass = False
             frame = self._capture_frame()
+            guard_y = self._actionable_filter_guard_y(frame)
             for name in names:
                 if name not in self.templates:
                     continue
-                if self._click_template_named(frame, name, f"incorrect_enabled_{name}"):
+                candidate = self._match_template_named(frame, name)
+                if candidate is None:
+                    continue
+                _, cy = self._resolve_match_center(frame, candidate)
+                if guard_y is not None and cy > guard_y:
+                    self._log_debug(
+                        f"[PHASE2] skip incorrect_enabled below guard template={name} tap_y={cy} guard_y={guard_y}"
+                    )
+                    continue
+                if self._click_template_named(
+                    frame,
+                    name,
+                    f"incorrect_enabled_{name}",
+                    allow_cache=False,
+                ):
                     clicked_in_pass = True
                     clicked_any = True
                     self._sleep(self.config.phase2.inter_click_delay_sec)
@@ -1415,7 +1484,7 @@ class GameBot:
                         debug_label=f"card_select_icon_{category}",
                     )
                 self.phase2_test_mode_card_index[category] = cursor + 1
-                self._sleep(0.2)
+                self._sleep(0.1)
                 print(
                     f"{log_prefix} select_card category={category} mode=icon "
                     f"slot={slot}/{len(icon_matches)} tap=({tx},{ty}) "
@@ -1448,7 +1517,7 @@ class GameBot:
             debug_label=f"card_select_grid_{category}",
         )
         self.phase2_test_mode_card_index[category] = cursor + 1
-        self._sleep(0.2)
+        self._sleep(0.1)
         print(
             f"{log_prefix} select_card category={category} mode=grid slot={slot} "
             f"tap=({tx},{ty}) x_pct={x_pct:.3f} y_pct={y_pct:.3f}"
