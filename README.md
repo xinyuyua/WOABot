@@ -69,6 +69,7 @@ Important flags:
 - `save_debug_screenshots`: save action screenshots (`true`/`false`)
 - `test_mode`: defaults to `true` (test mode). Set to `false` for production/real actions.
 - `phase2.parse_plane_info`: toggle OCR for plane ID/model (`true`/`false`).
+- `phase2.stop_on_unhandled_processing_state`: if `true`, stop bot on unknown processing state; if `false`, warn and continue.
 
 ### Template naming for incorrect enabled filters
 
@@ -169,9 +170,11 @@ Tune these rectangles in `config.yaml` if plane name/model extraction is unstabl
 
 - `adb devices` shows no emulator/device:
   - restart adb server:
-    - `adb kill-server`
-    - `adb start-server`
-    - `adb devices`
+    ```
+    adb kill-server
+    adb start-server
+    adb devices
+    ```
   - if still missing, restart emulator and run `adb devices` again
   - if multiple devices are connected, set `serial` in `config.yaml`
 - `Screenshot bytes are empty or not a valid PNG stream`:

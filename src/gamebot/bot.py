@@ -122,12 +122,7 @@ class GameBot:
 
         deadline = time.time() + max(0.1, timeout_sec)
         while time.time() < deadline:
-            match = self._find_preferred_lower_left_match_named(
-                frame,
-                anchor_template,
-                require_left_panel=True,
-            )
-            if match is not None:
+            if self._is_detail_anchor_visible(frame):
                 return frame
             self._sleep_exact(0.06)
             frame = self._capture_frame()
@@ -136,6 +131,17 @@ class GameBot:
             frame=frame,
         )
         return frame
+
+    def _is_detail_anchor_visible(self, frame: np.ndarray) -> bool:
+        anchor_template = self.config.phase2.plane_header_anchor_template
+        if not anchor_template or anchor_template not in self.templates:
+            return False
+        match = self._find_preferred_lower_left_match_named(
+            frame,
+            anchor_template,
+            require_left_panel=True,
+        )
+        return match is not None
 
     def _decode_frame(self, png_bytes: bytes) -> np.ndarray:
         if not png_bytes:
@@ -1436,7 +1442,8 @@ class GameBot:
                 f"unhandled_processing_state plane='{plane_name}' model='{plane_model}' reason={reason}",
                 frame=frame,
             )
-        self._request_shutdown("unhandled_processing_state")
+        if self.config.phase2.stop_on_unhandled_processing_state:
+            self._request_shutdown("unhandled_processing_state")
         return False
 
     def _handle_processing(self, frame: np.ndarray, plane_name: str, plane_model: str) -> bool:
@@ -1513,6 +1520,15 @@ class GameBot:
             self.config.phase2.processing_assign_crew_disabled_template,
         )
         if not assign_crew_disabled:
+            # Transient UI: card selected but detail panel not opened yet.
+            if self.config.phase2.parse_plane_info and not self._is_detail_anchor_visible(frame):
+                self._record_plane_action(
+                    plane_name,
+                    "processing",
+                    "skip_processing_detail_not_ready",
+                    plane_model,
+                )
+                return False
             return self._stop_for_unhandled_processing_state(
                 frame,
                 plane_name,
@@ -1770,10 +1786,15 @@ class GameBot:
         attempts = self._estimate_cards_per_category(self._capture_frame(), category_name)
         attempts = max(1, attempts)
         for _ in range(attempts):
+            if self.shutdown_requested:
+                break
             frame = self._capture_frame()
             if not self._select_next_card(frame, category_name, dry_run=False, log_prefix="[PHASE2]"):
                 break
             frame = self._wait_for_detail_card_ready()
+            if self.config.phase2.parse_plane_info and not self._is_detail_anchor_visible(frame):
+                self._log_debug(f"[PHASE2] detail card not ready after card select; skip category={category_name}")
+                continue
             if self.config.phase2.parse_plane_info:
                 plane_name, plane_model = self._extract_plane_identity(frame)
             else:
@@ -1897,6 +1918,8 @@ class GameBot:
             ]
 
             for name, cfg in categories:
+                if self.shutdown_requested:
+                    break
                 any_action = self._clear_incorrect_enabled_buttons() or any_action
                 frame = self._capture_frame()
                 tab_clicked = self._click_template_named(
@@ -1933,12 +1956,16 @@ class GameBot:
         frame = self._capture_frame()
         if self._handle_category(frame, "processing", self.config.phase2.processing):
             return True
+        if self.shutdown_requested:
+            return any_action
         self._sleep(self.config.phase2.inter_click_delay_sec)
 
         any_action = self._clear_incorrect_enabled_buttons() or any_action
         frame = self._capture_frame()
         if self._handle_category(frame, "landing", self.config.phase2.landing):
             return True
+        if self.shutdown_requested:
+            return any_action
         self._sleep(self.config.phase2.inter_click_delay_sec)
 
         any_action = self._clear_incorrect_enabled_buttons() or any_action

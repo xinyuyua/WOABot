@@ -80,6 +80,7 @@ class Phase2CategoryConfig:
 class Phase2Config:
     enabled: bool
     parse_plane_info: bool
+    stop_on_unhandled_processing_state: bool
     post_start_delay_sec: float
     inter_click_delay_sec: float
     action_cycle_delay_sec: float
@@ -231,6 +232,7 @@ def _build_default_phase2() -> dict[str, Any]:
     return {
         "enabled": True,
         "parse_plane_info": True,
+        "stop_on_unhandled_processing_state": False,
         "post_start_delay_sec": 2.0,
         "inter_click_delay_sec": 0.3,
         "action_cycle_delay_sec": 0.5,
@@ -291,6 +293,9 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
     phase2 = Phase2Config(
         enabled=bool(merged.get("enabled", True)),
         parse_plane_info=bool(merged.get("parse_plane_info", True)),
+        stop_on_unhandled_processing_state=bool(
+            merged.get("stop_on_unhandled_processing_state", False)
+        ),
         post_start_delay_sec=float(merged.get("post_start_delay_sec", 2.0)),
         inter_click_delay_sec=float(merged.get("inter_click_delay_sec", 0.3)),
         action_cycle_delay_sec=float(merged.get("action_cycle_delay_sec", 0.5)),

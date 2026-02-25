@@ -188,7 +188,8 @@ startup_flow:
 
 phase2:
   enabled: true
-  parse_plane_info: true
+  parse_plane_info: false
+  stop_on_unhandled_processing_state: false
   post_start_delay_sec: 2.0
   inter_click_delay_sec: 0.3
   action_cycle_delay_sec: 0.5
