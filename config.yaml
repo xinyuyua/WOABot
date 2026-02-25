@@ -109,6 +109,12 @@ templates:
     action:
       type: tap_center
 
+  - name: processing_extend_contract_button
+    path: templates/processing_extend_contract_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
 
   - name: processing_claim_rewards_and_upgrade_popup_button
     path: templates/processing_claim_rewards_and_upgrade_popup_button.png
@@ -166,7 +172,7 @@ startup_flow:
     template: start_button
 
   - type: pick_airport_image
-    image: airport_inn.png
+    image: airport_bri.png
     image_threshold: 0.70
     max_scrolls: 8
     swipe_scale: 0.45
@@ -211,6 +217,7 @@ phase2:
     tab_template: depart_tab_button
 
   processing_claim_rewards_template: processing_claim_rewards_button
+  processing_extend_contract_template: processing_extend_contract_button
   processing_maintenance_template: ""
   processing_finish_handling_template: processing_finish_handling_button
   processing_claim_rewards_and_upgrade_popup_template: processing_claim_rewards_and_upgrade_popup_button

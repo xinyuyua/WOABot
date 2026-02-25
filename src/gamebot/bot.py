@@ -1360,7 +1360,46 @@ class GameBot:
         print(f"[REPORT] handled_landing={landing}")
         print(f"[REPORT] handled_depart={depart}")
 
+    def _stop_for_unhandled_processing_state(
+        self,
+        frame: np.ndarray,
+        plane_name: str,
+        plane_model: str,
+        reason: str,
+    ) -> bool:
+        self._record_plane_action(
+            plane_name,
+            "processing",
+            f"skip_unhandled_processing_state reason={reason}",
+            plane_model,
+        )
+        screenshot_path = self._save_debug(frame, "processing_unhandled_state", force=True)
+        if screenshot_path:
+            self._log_warn(
+                f"unhandled_processing_state plane='{plane_name}' model='{plane_model}' "
+                f"reason={reason} screenshot={screenshot_path}",
+                frame=frame,
+            )
+        else:
+            self._log_warn(
+                f"unhandled_processing_state plane='{plane_name}' model='{plane_model}' reason={reason}",
+                frame=frame,
+            )
+        self._request_shutdown("unhandled_processing_state")
+        return False
+
     def _handle_processing(self, frame: np.ndarray, plane_name: str, plane_model: str) -> bool:
+        # Edge case: extend contract action.
+        extend_contract_tmpl = self.config.phase2.processing_extend_contract_template
+        if extend_contract_tmpl and extend_contract_tmpl in self.templates:
+            if self._click_template_named(
+                frame,
+                extend_contract_tmpl,
+                "processing_extend_contract",
+            ):
+                self._record_plane_action(plane_name, "processing", "extend_contract", plane_model)
+                return True
+
         # Edge case: maintenance action.
         maintenance_tmpl = self.config.phase2.processing_maintenance_template
         if maintenance_tmpl and maintenance_tmpl in self.templates:
@@ -1422,8 +1461,12 @@ class GameBot:
             self.config.phase2.processing_assign_crew_disabled_template,
         )
         if not assign_crew_disabled:
-            self._record_plane_action(plane_name, "processing", "skip_no_processing_action", plane_model)
-            return False
+            return self._stop_for_unhandled_processing_state(
+                frame,
+                plane_name,
+                plane_model,
+                "no_known_processing_button",
+            )
 
         # Case 2: assign crew disabled -> click add first -> if not enough before toggle, skip -> then toggle -> start handling.
         toggled = False
@@ -1553,7 +1596,14 @@ class GameBot:
                 "[PHASE2] processing add_debug "
                 f"enabled_conf={add_enabled_conf} disabled_conf={add_disabled_conf}"
             )
-        return add_clicks > 0 or toggled
+        if add_clicks > 0 or toggled:
+            return True
+        return self._stop_for_unhandled_processing_state(
+            frame,
+            plane_name,
+            plane_model,
+            f"assign_crew_not_started reason={add_loop_reason}",
+        )
 
     def _handle_landing(self, frame: np.ndarray, plane_name: str, plane_model: str) -> bool:
         # Case 1: stand selection flow (priority to avoid false clear-to-land hits).
@@ -2040,6 +2090,8 @@ class GameBot:
                     self.step()
                 except Exception as exc:
                     self._log_error(str(exc))
+                if self.shutdown_requested:
+                    break
 
                 if self._next_sleep_override_sec is not None:
                     sleep_time = self._next_sleep_override_sec

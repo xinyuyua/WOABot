@@ -96,6 +96,7 @@ class Phase2Config:
     landing: Phase2CategoryConfig
     depart: Phase2CategoryConfig
     processing_claim_rewards_template: str
+    processing_extend_contract_template: str
     processing_maintenance_template: str
     processing_claim_rewards_and_upgrade_popup_template: str
     processing_claim_reward_popup_template: str
@@ -251,6 +252,7 @@ def _build_default_phase2() -> dict[str, Any]:
             "tab_template": "depart_tab_button",
         },
         "processing_claim_rewards_template": "processing_claim_rewards_button",
+        "processing_extend_contract_template": "",
         "processing_maintenance_template": "",
         "processing_claim_rewards_and_upgrade_popup_template": "processing_claim_rewards_and_upgrade_popup_button",
         "processing_claim_reward_popup_template": "",
@@ -314,6 +316,9 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
         ),
         processing_claim_rewards_template=str(
             merged.get("processing_claim_rewards_template", "processing_claim_rewards_button")
+        ),
+        processing_extend_contract_template=str(
+            merged.get("processing_extend_contract_template", "")
         ),
         processing_maintenance_template=str(
             merged.get("processing_maintenance_template", "")
