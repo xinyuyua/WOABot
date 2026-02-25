@@ -99,6 +99,7 @@ class Phase2Config:
     processing_extend_contract_template: str
     processing_maintenance_template: str
     processing_claim_rewards_and_upgrade_popup_template: str
+    processing_claim_rewards_and_extend_popup_template: str
     processing_claim_reward_popup_template: str
     processing_finish_handling_template: str
     processing_not_enough_message_template: str
@@ -255,6 +256,7 @@ def _build_default_phase2() -> dict[str, Any]:
         "processing_extend_contract_template": "",
         "processing_maintenance_template": "",
         "processing_claim_rewards_and_upgrade_popup_template": "processing_claim_rewards_and_upgrade_popup_button",
+        "processing_claim_rewards_and_extend_popup_template": "",
         "processing_claim_reward_popup_template": "",
         "processing_finish_handling_template": "processing_finish_handling_button",
         "processing_not_enough_message_template": "processing_not_enough_crew_message",
@@ -273,8 +275,8 @@ def _build_default_phase2() -> dict[str, Any]:
         "depart_execute_button_template": "depart_execute_button",
         "depart_yellow_button_region_pct": {"x": 0.02, "y": 0.72, "w": 0.24, "h": 0.24},
         "plane_header_anchor_template": "",
-        "plane_name_from_anchor_pct": {"x": -0.205, "y": -0.090, "w": 0.075, "h": 0.058},
-        "plane_model_from_anchor_pct": {"x": -0.135, "y": -0.090, "w": 0.055, "h": 0.058},
+        "plane_name_from_anchor_pct": {"x": -0.208, "y": -0.104, "w": 0.076, "h": 0.046},
+        "plane_model_from_anchor_pct": {"x": -0.136, "y": -0.104, "w": 0.060, "h": 0.046},
     }
 
 
@@ -328,6 +330,9 @@ def _load_phase2(raw: dict[str, Any]) -> Phase2Config:
                 "processing_claim_rewards_and_upgrade_popup_template",
                 "processing_claim_rewards_and_upgrade_popup_button",
             )
+        ),
+        processing_claim_rewards_and_extend_popup_template=str(
+            merged.get("processing_claim_rewards_and_extend_popup_template", "")
         ),
         processing_claim_reward_popup_template=str(
             merged.get("processing_claim_reward_popup_template", "")

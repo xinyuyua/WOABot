@@ -108,6 +108,35 @@ class GameBot:
     def _sleep_card_settle(self) -> None:
         time.sleep(random.uniform(0.1, 0.2))
 
+    def _wait_for_detail_card_ready(self, timeout_sec: float = 0.7) -> np.ndarray:
+        # Initial settle to let UI transition complete after card tap.
+        self._sleep_card_settle()
+        frame = self._capture_frame()
+        anchor_template = self.config.phase2.plane_header_anchor_template
+        if not (
+            self.config.phase2.parse_plane_info
+            and anchor_template
+            and anchor_template in self.templates
+        ):
+            return frame
+
+        deadline = time.time() + max(0.1, timeout_sec)
+        while time.time() < deadline:
+            match = self._find_preferred_lower_left_match_named(
+                frame,
+                anchor_template,
+                require_left_panel=True,
+            )
+            if match is not None:
+                return frame
+            self._sleep_exact(0.06)
+            frame = self._capture_frame()
+        self._log_warn(
+            f"detail_card_not_ready timeout={timeout_sec:.2f}s anchor={anchor_template}",
+            frame=frame,
+        )
+        return frame
+
     def _decode_frame(self, png_bytes: bytes) -> np.ndarray:
         if not png_bytes:
             raise ValueError(
@@ -742,7 +771,7 @@ class GameBot:
         return match_template(frame, tmpl)
 
     def _find_preferred_lower_left_match_named(
-        self, frame: np.ndarray, template_name: str
+        self, frame: np.ndarray, template_name: str, require_left_panel: bool = False
     ) -> MatchResult | None:
         tmpl = self.templates.get(template_name)
         if tmpl is None:
@@ -772,12 +801,15 @@ class GameBot:
         left_panel = [
             c
             for c in candidates
-            if c[0] <= int(w * 0.45) and c[1] >= int(h * 0.18)
+            if c[0] <= int(w * 0.45) and int(h * 0.25) <= c[1] <= int(h * 0.85)
         ]
+        if require_left_panel and not left_panel:
+            return None
         pool = left_panel if left_panel else candidates
 
-        # Lower-left preference: largest y, then smallest x, then highest confidence.
-        x, y, conf = sorted(pool, key=lambda t: (-t[1], t[0], -t[2]))[0]
+        # For the detail card icon stack, header anchor should be the top-most icon
+        # in the left panel. Use y asc, then x asc, then confidence desc.
+        x, y, conf = sorted(pool, key=lambda t: (t[1], t[0], -t[2]))[0]
         return MatchResult(
             name=tmpl.name,
             confidence=conf,
@@ -1149,7 +1181,21 @@ class GameBot:
             and self.config.phase2.plane_model_from_anchor_pct is not None
             and anchor_template in self.templates
         ):
-            anchor_match = self._find_preferred_lower_left_match_named(frame, anchor_template)
+            search_frame = frame
+            anchor_match = None
+            for attempt in range(3):
+                anchor_match = self._find_preferred_lower_left_match_named(
+                    search_frame,
+                    anchor_template,
+                    require_left_panel=True,
+                )
+                if anchor_match is not None:
+                    frame = search_frame
+                    break
+                if attempt < 2:
+                    # Detail card can pop a bit later than card selection.
+                    self._sleep_exact(0.08)
+                    search_frame = self._capture_frame()
             if anchor_match is not None:
                 ax, ay = self._resolve_match_center(frame, anchor_match)
                 name_box = self._box_from_anchor_offset(
@@ -1167,6 +1213,11 @@ class GameBot:
                 self._log_debug(
                     f"[OCR] anchor={anchor_template} center=({ax},{ay}) "
                     f"name_box={name_box} model_box={model_box}"
+                )
+            else:
+                self._log_warn(
+                    f"plane_header_anchor_not_found template={anchor_template}; using fallback OCR boxes",
+                    frame=frame,
                 )
 
         if name_box is None or model_box is None:
@@ -1428,6 +1479,7 @@ class GameBot:
         ):
             popup_templates = [
                 self.config.phase2.processing_claim_rewards_and_upgrade_popup_template,
+                self.config.phase2.processing_claim_rewards_and_extend_popup_template,
                 self.config.phase2.processing_claim_reward_popup_template,
             ]
             popup_clicked = False
@@ -1721,8 +1773,7 @@ class GameBot:
             frame = self._capture_frame()
             if not self._select_next_card(frame, category_name, dry_run=False, log_prefix="[PHASE2]"):
                 break
-            self._sleep_card_settle()
-            frame = self._capture_frame()
+            frame = self._wait_for_detail_card_ready()
             if self.config.phase2.parse_plane_info:
                 plane_name, plane_model = self._extract_plane_identity(frame)
             else:
@@ -1863,8 +1914,7 @@ class GameBot:
                         dry_run=False,
                     )
                     if card_clicked and self.config.phase2.parse_plane_info:
-                        self._sleep_card_settle()
-                        detail_frame = self._capture_frame()
+                        detail_frame = self._wait_for_detail_card_ready()
                         test_plane_name, test_plane_model = self._extract_plane_identity(detail_frame)
                         print(
                             f"{ANSI_GREEN}[PLANE-TEST]{ANSI_RESET} "

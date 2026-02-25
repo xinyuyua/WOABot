@@ -125,6 +125,7 @@ Processing:
 - `processing_claim_rewards_button` -> click
   - then checks popup buttons:
     - `processing_claim_rewards_and_upgrade_popup_button`
+    - `processing_claim_rewards_and_extend_popup_button`
     - `processing_claim_reward_popup_button`
 - Assign-crew case:
   - click add first

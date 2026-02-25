@@ -188,7 +188,7 @@ startup_flow:
 
 phase2:
   enabled: true
-  parse_plane_info: false
+  parse_plane_info: true
   post_start_delay_sec: 2.0
   inter_click_delay_sec: 0.3
   action_cycle_delay_sec: 0.5
@@ -221,6 +221,7 @@ phase2:
   processing_maintenance_template: ""
   processing_finish_handling_template: processing_finish_handling_button
   processing_claim_rewards_and_upgrade_popup_template: processing_claim_rewards_and_upgrade_popup_button
+  processing_claim_rewards_and_extend_popup_template: ""
   processing_claim_reward_popup_template: processing_claim_reward_popup_button
   processing_not_enough_message_template: processing_not_enough_crew_message
   processing_assign_crew_disabled_template: processing_assign_crew_disabled_button
@@ -254,15 +255,15 @@ phase2:
   # absolute `plane_name_region_pct` / `plane_model_region_pct`.
   plane_header_anchor_template: processing_plane_header_anchor
   plane_name_from_anchor_pct:
-    x: -0.205
-    y: -0.090
-    w: 0.075
-    h: 0.058
+    x: -0.208
+    y: -0.104
+    w: 0.076
+    h: 0.046
   plane_model_from_anchor_pct:
-    x: -0.135
-    y: -0.090
-    w: 0.055
-    h: 0.058
+    x: -0.136
+    y: -0.104
+    w: 0.060
+    h: 0.046
 
   plane_name_region_pct:
     x: 0.020
