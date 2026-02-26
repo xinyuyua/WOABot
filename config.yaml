@@ -122,6 +122,12 @@ templates:
     action:
       type: tap_center
 
+  - name: processing_claim_rewards_and_extend_popup_button
+    path: templates/processing_claim_rewards_and_extend_popup_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
   - name: processing_claim_reward_popup_button
     path: templates/processing_claim_reward_popup_button.png
     threshold: 0.90
@@ -222,7 +228,7 @@ phase2:
   processing_maintenance_template: ""
   processing_finish_handling_template: processing_finish_handling_button
   processing_claim_rewards_and_upgrade_popup_template: processing_claim_rewards_and_upgrade_popup_button
-  processing_claim_rewards_and_extend_popup_template: ""
+  processing_claim_rewards_and_extend_popup_template: processing_claim_rewards_and_extend_popup_button
   processing_claim_reward_popup_template: processing_claim_reward_popup_button
   processing_not_enough_message_template: processing_not_enough_crew_message
   processing_assign_crew_disabled_template: processing_assign_crew_disabled_button
