@@ -17,9 +17,49 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def restart_adb_server(adb_path: str) -> None:
+    try:
+        devices = subprocess.run(
+            [adb_path, "devices"], check=False, capture_output=True, text=True
+        )
+        if devices.returncode == 0:
+            lines = [line.strip() for line in devices.stdout.splitlines() if line.strip()]
+            device_rows = [line for line in lines[1:] if "\t" in line]
+            if device_rows:
+                print("[INFO] ADB device detected. Skipping adb server restart.")
+                return
+    except FileNotFoundError:
+        print(f"[WARN] adb not found at '{adb_path}'. Skipping adb restart.")
+        return
+    except Exception as exc:
+        print(f"[WARN] Failed to run 'adb devices': {exc}")
+
+    print("[INFO] Restarting ADB server...")
+    try:
+        subprocess.run([adb_path, "kill-server"], check=False, capture_output=True, text=True)
+    except Exception as exc:
+        print(f"[WARN] Failed to run 'adb kill-server': {exc}")
+
+    try:
+        start = subprocess.run(
+            [adb_path, "start-server"], check=False, capture_output=True, text=True
+        )
+        if start.returncode == 0:
+            print("[INFO] ADB server started.")
+        else:
+            err = (start.stderr or start.stdout or "").strip()
+            print(
+                f"[WARN] 'adb start-server' returned non-zero exit code ({start.returncode}). {err}"
+            )
+    except Exception as exc:
+        print(f"[WARN] Failed to run 'adb start-server': {exc}")
+
+
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
+    restart_adb_server(cfg.adb_path)
+    restart_adb_server(cfg.adb_path)
     bot = GameBot(cfg)
     caffeinate_proc: subprocess.Popen[bytes] | None = None
     try:

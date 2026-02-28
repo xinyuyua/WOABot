@@ -178,7 +178,9 @@ startup_flow:
     template: start_button
 
   - type: pick_airport_image
-    image: airport_bri.png
+    # image: airport_inn.png
+    # image: airport_bri.png
+    image: airport_prg.png
     image_threshold: 0.70
     max_scrolls: 8
     swipe_scale: 0.45
@@ -236,7 +238,7 @@ phase2:
   processing_add_disabled_template: processing_add_disabled_button
   processing_toggle_button_template: processing_ramp_agent_toggle_button
   processing_start_handling_template: processing_start_handling_button
-  processing_max_add_clicks: 12
+  processing_max_add_clicks: 15
   # Optional explicit list. Any template named button_enabled_incorrect_<N>
   # is also auto-detected and handled even if not listed here.
   incorrect_enabled_templates:

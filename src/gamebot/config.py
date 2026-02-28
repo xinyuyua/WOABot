@@ -267,7 +267,7 @@ def _build_default_phase2() -> dict[str, Any]:
         "processing_add_disabled_template": "processing_add_disabled_button",
         "processing_toggle_button_template": "processing_ramp_agent_toggle_button",
         "processing_start_handling_template": "processing_start_handling_button",
-        "processing_max_add_clicks": 12,
+        "processing_max_add_clicks": 15,
         "incorrect_enabled_templates": [],
         "incorrect_enabled_max_passes": 2,
         "landing_clear_to_land_template": "landing_clear_to_land_button",

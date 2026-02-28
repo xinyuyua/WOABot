@@ -99,7 +99,8 @@ class GameBot:
             print(f"[DEBUG] {msg}")
 
     def _sleep(self, seconds: float) -> None:
-        delay = max(0.01, seconds + random.uniform(-0.1, 0.1))
+        base = max(0.01, seconds)
+        delay = max(0.01, base * random.uniform(0.8, 1.2))
         time.sleep(delay)
 
     def _sleep_exact(self, seconds: float) -> None:
@@ -1552,51 +1553,30 @@ class GameBot:
             add_match = self._find_rightmost_match_named(
                 frame, self.config.phase2.processing_add_enabled_template
             )
-            has_enabled = add_match is not None
-            has_disabled = self._has_template_named(
-                frame,
-                self.config.phase2.processing_add_disabled_template,
-            )
-
-            if has_enabled:
-                if self.processing_add_button_anchor_px is None and add_match is not None:
-                    self._set_processing_add_anchor_from_match(frame, add_match)
-                if not self._click_processing_add_anchor(frame):
+            if self.processing_add_button_anchor_px is None and add_match is not None:
+                self._set_processing_add_anchor_from_match(frame, add_match)
+            if not self._click_processing_add_anchor(frame):
+                if add_match is None:
+                    add_loop_reason = "add_button_not_found_and_no_anchor"
+                else:
+            if self.processing_add_button_anchor_px is None and add_match is not None:
+                self._set_processing_add_anchor_from_match(frame, add_match)
+            if not self._click_processing_add_anchor(frame):
+                if add_match is None:
+                    add_loop_reason = "add_button_not_found_and_no_anchor"
+                else:
                     add_loop_reason = "add_anchor_not_set"
-                    break
-                add_clicks += 1
-                add_loop_reason = "clicked_until_limit_or_disabled"
-                self._sleep(0.08)
-                check_frame = self._capture_frame()
-                if (
-                    self._has_template_named(
-                        check_frame,
-                        self.config.phase2.processing_not_enough_message_template,
-                    )
-                    and self._has_template_named(
-                        check_frame,
-                        self.config.phase2.processing_add_enabled_template,
-                    )
-                ):
-                    add_loop_reason = "not_enough_after_add"
-                    break
-                continue
-
-            if has_disabled:
-                add_loop_reason = "already_disabled"
                 break
-
-            if self.processing_add_button_anchor_px is not None:
-                if not self._click_processing_add_anchor(frame):
-                    add_loop_reason = "add_anchor_not_set"
-                    break
-                add_clicks += 1
-                add_loop_reason = "clicked_by_anchor_without_template"
-                self._sleep(0.08)
-                continue
-
-            add_loop_reason = "add_button_not_found_and_no_anchor"
-            break
+            add_clicks += 1
+            add_loop_reason = "clicked_max_or_not_enough"
+        if add_clicks > 0:
+            self._sleep_exact(0.1)
+            check_frame = self._capture_frame()
+            if self._has_template_named(
+                check_frame,
+                self.config.phase2.processing_not_enough_message_template,
+            ):
+                add_loop_reason = "not_enough_after_add"
 
         if add_loop_reason == "not_enough_after_add":
             self._record_plane_action(
@@ -2011,9 +1991,9 @@ class GameBot:
                 region,
             )
             if icon_matches:
-                cursor = self.phase2_test_mode_card_index.get(category, 0)
-                slot = cursor % len(icon_matches)
-                picked = icon_matches[slot]
+                picked = icon_matches[0]
+                picked = icon_matches[0]
+                picked = icon_matches[0]
                 if dry_run:
                     tx, ty = self._resolve_match_center(frame, picked)
                 else:
@@ -2022,11 +2002,12 @@ class GameBot:
                         picked,
                         debug_label=f"card_select_icon_{category}",
                     )
-                self.phase2_test_mode_card_index[category] = cursor + 1
                 self._sleep(0.1)
                 print(
                     f"{log_prefix} select_card category={category} mode=icon "
-                    f"slot={slot}/{len(icon_matches)} tap=({tx},{ty}) "
+                    f"slot=0/{len(icon_matches)} tap=({tx},{ty}) "
+                    f"slot=0/{len(icon_matches)} tap=({tx},{ty}) "
+                    f"slot=0/{len(icon_matches)} tap=({tx},{ty}) "
                     f"icon_conf={picked.confidence:.3f}"
                 )
                 return True
@@ -2036,12 +2017,9 @@ class GameBot:
         # Auto-compute visible slots from start+step geometry.
         cards_per = int((1.0 - self.config.phase2.card_start_y_pct) / self.config.phase2.card_step_y_pct) + 1
         cards_per = max(1, cards_per)
-        cursor = self.phase2_test_mode_card_index.get(category, 0)
-        slot = cursor % cards_per
-        local_y = (
-            self.config.phase2.card_start_y_pct
-            + slot * self.config.phase2.card_step_y_pct
-        )
+        local_y = self.config.phase2.card_start_y_pct
+        local_y = self.config.phase2.card_start_y_pct
+        local_y = self.config.phase2.card_start_y_pct
         if local_y > 0.98:
             local_y = 0.98
 
@@ -2055,10 +2033,9 @@ class GameBot:
             do_tap=not dry_run,
             debug_label=f"card_select_grid_{category}",
         )
-        self.phase2_test_mode_card_index[category] = cursor + 1
         self._sleep(0.1)
         print(
-            f"{log_prefix} select_card category={category} mode=grid slot={slot} "
+            f"{log_prefix} select_card category={category} mode=grid slot=0 "
             f"tap=({tx},{ty}) x_pct={x_pct:.3f} y_pct={y_pct:.3f}"
         )
         return True
