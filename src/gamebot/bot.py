@@ -1559,12 +1559,6 @@ class GameBot:
                 if add_match is None:
                     add_loop_reason = "add_button_not_found_and_no_anchor"
                 else:
-            if self.processing_add_button_anchor_px is None and add_match is not None:
-                self._set_processing_add_anchor_from_match(frame, add_match)
-            if not self._click_processing_add_anchor(frame):
-                if add_match is None:
-                    add_loop_reason = "add_button_not_found_and_no_anchor"
-                else:
                     add_loop_reason = "add_anchor_not_set"
                 break
             add_clicks += 1
