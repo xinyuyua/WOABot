@@ -1883,13 +1883,15 @@ class GameBot:
         if self._phase2_setup(frame):
             return True
 
+        categories: list[tuple[str, Phase2CategoryConfig]] = [
+            ("processing", self.config.phase2.processing),
+            ("landing", self.config.phase2.landing),
+        ]
+        if not self.config.phase2.no_take_off_mode:
+            categories.append(("depart", self.config.phase2.depart))
+
         if self.config.test_mode:
             any_action = False
-            categories: list[tuple[str, Phase2CategoryConfig]] = [
-                ("processing", self.config.phase2.processing),
-                ("landing", self.config.phase2.landing),
-                ("depart", self.config.phase2.depart),
-            ]
 
             for name, cfg in categories:
                 if self.shutdown_requested:
@@ -1926,26 +1928,15 @@ class GameBot:
             return any_action
 
         any_action = False
-        any_action = self._clear_incorrect_enabled_buttons() or any_action
-        frame = self._capture_frame()
-        if self._handle_category(frame, "processing", self.config.phase2.processing):
-            return True
-        if self.shutdown_requested:
-            return any_action
-        self._sleep(self.config.phase2.inter_click_delay_sec)
-
-        any_action = self._clear_incorrect_enabled_buttons() or any_action
-        frame = self._capture_frame()
-        if self._handle_category(frame, "landing", self.config.phase2.landing):
-            return True
-        if self.shutdown_requested:
-            return any_action
-        self._sleep(self.config.phase2.inter_click_delay_sec)
-
-        any_action = self._clear_incorrect_enabled_buttons() or any_action
-        frame = self._capture_frame()
-        if self._handle_category(frame, "depart", self.config.phase2.depart):
-            return True
+        for index, (name, cfg) in enumerate(categories):
+            any_action = self._clear_incorrect_enabled_buttons() or any_action
+            frame = self._capture_frame()
+            if self._handle_category(frame, name, cfg):
+                return True
+            if self.shutdown_requested:
+                return any_action
+            if index < len(categories) - 1:
+                self._sleep(self.config.phase2.inter_click_delay_sec)
 
         if not any_action:
             print("[PHASE2] no action performed in this cycle")

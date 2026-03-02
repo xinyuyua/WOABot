@@ -69,6 +69,7 @@ Important flags:
 - `save_debug_screenshots`: save action screenshots (`true`/`false`)
 - `test_mode`: defaults to `true` (test mode). Set to `false` for production/real actions.
 - `phase2.parse_plane_info`: toggle OCR for plane ID/model (`true`/`false`).
+- `phase2.no_take_off_mode`: if `true`, skip departure and only run `processing -> landing`.
 - `phase2.stop_on_unhandled_processing_state`: if `true`, stop bot on unknown processing state; if `false`, warn and continue.
 
 ### Template naming for incorrect enabled filters
@@ -105,6 +106,19 @@ Then run the same command:
 
 ```bash
 python3 run_bot.py --config config.yaml
+```
+
+Runtime overrides (no file edits needed):
+
+```bash
+# override airport image target at startup
+python3 run_bot.py --config config.yaml --airport-image airport_inn.png
+
+# no-take-off mode (processing + landing only)
+python3 run_bot.py --config config.yaml --no-take-off-mode
+
+# force normal mode with depart enabled
+python3 run_bot.py --config config.yaml --take-off-mode
 ```
 
 ## Current behavior summary
@@ -145,6 +159,7 @@ Depart:
 
 Loop order and delay:
 - Always try in order: `processing -> landing -> depart`
+- If `phase2.no_take_off_mode: true`, order becomes `processing -> landing` only.
 - If any category performs an action, restart from `processing`
 - Delay after action cycle: `phase2.action_cycle_delay_sec` (default `0.5`)
 - If no action across all 3 categories, wait `phase2.idle_cycle_delay_sec` (default `2.0`)

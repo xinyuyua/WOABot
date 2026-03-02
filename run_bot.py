@@ -8,12 +8,28 @@ import shutil
 import subprocess
 
 from src.gamebot.bot import GameBot
-from src.gamebot.config import load_config
+from src.gamebot.config import BotConfig, load_config
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Minimal ADB game automation bot")
     parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
+    parser.add_argument(
+        "--airport-image",
+        default="",
+        help="Override airport image filename for pick_airport_image step(s), e.g. airport_inn.png",
+    )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--no-take-off-mode",
+        action="store_true",
+        help="Skip depart category and only run processing + landing.",
+    )
+    mode_group.add_argument(
+        "--take-off-mode",
+        action="store_true",
+        help="Force normal mode including depart category.",
+    )
     return parser.parse_args()
 
 
@@ -55,10 +71,30 @@ def restart_adb_server(adb_path: str) -> None:
         print(f"[WARN] Failed to run 'adb start-server': {exc}")
 
 
+def apply_runtime_overrides(cfg: BotConfig, args: argparse.Namespace) -> None:
+    if args.airport_image:
+        patched = False
+        for step in cfg.startup_flow:
+            if step.type == "pick_airport_image":
+                step.image = args.airport_image
+                patched = True
+        if patched:
+            print(f"[INFO] Runtime override applied: pick_airport_image='{args.airport_image}'")
+        else:
+            print("[WARN] --airport-image provided but no pick_airport_image step found in startup_flow.")
+
+    if args.no_take_off_mode:
+        cfg.phase2.no_take_off_mode = True
+        print("[INFO] Runtime override applied: phase2.no_take_off_mode=true")
+    elif args.take_off_mode:
+        cfg.phase2.no_take_off_mode = False
+        print("[INFO] Runtime override applied: phase2.no_take_off_mode=false")
+
+
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
-    restart_adb_server(cfg.adb_path)
+    apply_runtime_overrides(cfg, args)
     restart_adb_server(cfg.adb_path)
     bot = GameBot(cfg)
     caffeinate_proc: subprocess.Popen[bytes] | None = None
