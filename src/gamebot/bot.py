@@ -1470,6 +1470,22 @@ class GameBot:
                 self._record_plane_action(plane_name, "processing", "maintenance", plane_model)
                 return True
 
+        # Edge case: start maintenance action (same slot area as assign-crew state).
+        start_maintenance_tmpl = self.config.phase2.processing_start_maintenance_template
+        if start_maintenance_tmpl and start_maintenance_tmpl in self.templates:
+            if self._click_template_named(
+                frame,
+                start_maintenance_tmpl,
+                "processing_start_maintenance",
+            ):
+                self._record_plane_action(
+                    plane_name,
+                    "processing",
+                    "start_maintenance",
+                    plane_model,
+                )
+                return True
+
         # Edge case: finish handling is available.
         if self._click_template_named(
             frame,

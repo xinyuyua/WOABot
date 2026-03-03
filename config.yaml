@@ -159,6 +159,12 @@ templates:
     action:
       type: tap_center
 
+  - name: processing_start_maintenance_button
+    path: templates/processing_start_maintenance_button.png
+    threshold: 0.90
+    action:
+      type: tap_center
+
 
   - name: processing_ramp_agent_toggle_button
     path: templates/processing_ramp_agent_toggle_button.png
@@ -237,6 +243,7 @@ phase2:
   processing_assign_crew_disabled_template: processing_assign_crew_disabled_button
   processing_add_enabled_template: processing_add_enabled_button
   processing_add_disabled_template: processing_add_disabled_button
+  processing_start_maintenance_template: processing_start_maintenance_button
   processing_toggle_button_template: processing_ramp_agent_toggle_button
   processing_start_handling_template: processing_start_handling_button
   processing_max_add_clicks: 15

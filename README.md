@@ -142,6 +142,7 @@ Processing:
     - `processing_claim_rewards_and_upgrade_popup_button`
     - `processing_claim_rewards_and_extend_popup_button`
     - `processing_claim_reward_popup_button`
+- `processing_start_maintenance_button` -> click
 - Assign-crew case:
   - click add first
   - if `processing_not_enough_crew_message` appears before toggle, skip this card
