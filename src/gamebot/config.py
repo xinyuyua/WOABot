@@ -135,6 +135,7 @@ class BotConfig:
     serial: str
     loop_interval_sec: float
     jitter_sec: float
+    no_take_off_idle_timeout_sec: float
     screenshot_dir: str
     debug_logging: bool
     save_debug_screenshots: bool
@@ -574,12 +575,16 @@ def load_config(path: str) -> BotConfig:
         startup_flow.append(flow_step)
 
     phase2 = _load_phase2(dict(cfg.get("phase2", {})))
+    no_take_off_idle_timeout_sec = float(cfg.get("no_take_off_idle_timeout_sec", 120.0))
+    if no_take_off_idle_timeout_sec <= 0:
+        raise ValueError("no_take_off_idle_timeout_sec must be > 0")
 
     return BotConfig(
         adb_path=cfg["adb_path"],
         serial=cfg["serial"],
         loop_interval_sec=float(cfg["loop_interval_sec"]),
         jitter_sec=float(cfg["jitter_sec"]),
+        no_take_off_idle_timeout_sec=no_take_off_idle_timeout_sec,
         screenshot_dir=cfg["screenshot_dir"],
         debug_logging=bool(cfg.get("debug_logging", False)),
         save_debug_screenshots=bool(cfg["save_debug_screenshots"]),

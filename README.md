@@ -70,6 +70,7 @@ Important flags:
 - `test_mode`: defaults to `true` (test mode). Set to `false` for production/real actions.
 - `phase2.parse_plane_info`: toggle OCR for plane ID/model (`true`/`false`).
 - `phase2.no_take_off_mode`: if `true`, skip departure and only run `processing -> landing`.
+- `no_take_off_idle_timeout_sec`: top-level timeout in seconds; when `phase2.no_take_off_mode` is `true`, bot exits if no processing/landing action occurs within this window.
 - `phase2.stop_on_unhandled_processing_state`: if `true`, stop bot on unknown processing state; if `false`, warn and continue.
 
 ### Template naming for incorrect enabled filters

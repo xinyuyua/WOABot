@@ -76,6 +76,8 @@ class GameBot:
         self.run_started_epoch: float = 0.0
 
         self._next_sleep_override_sec: float | None = None
+        self.no_take_off_idle_since_epoch: float | None = None
+        self.phase2_plane_action_last_cycle = False
 
         Path(self.config.screenshot_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1894,9 +1896,11 @@ class GameBot:
 
     def _run_phase2_cycle(self, frame: np.ndarray) -> bool:
         if not self.config.phase2.enabled:
+            self.phase2_plane_action_last_cycle = False
             return False
 
         if self._phase2_setup(frame):
+            self.phase2_plane_action_last_cycle = False
             return True
 
         categories: list[tuple[str, Phase2CategoryConfig]] = [
@@ -1907,6 +1911,7 @@ class GameBot:
             categories.append(("depart", self.config.phase2.depart))
 
         if self.config.test_mode:
+            self.phase2_plane_action_last_cycle = False
             any_action = False
 
             for name, cfg in categories:
@@ -1943,11 +1948,13 @@ class GameBot:
 
             return any_action
 
+        self.phase2_plane_action_last_cycle = False
         any_action = False
         for index, (name, cfg) in enumerate(categories):
             any_action = self._clear_incorrect_enabled_buttons() or any_action
             frame = self._capture_frame()
             if self._handle_category(frame, name, cfg):
+                self.phase2_plane_action_last_cycle = True
                 return True
             if self.shutdown_requested:
                 return any_action
@@ -2111,6 +2118,7 @@ class GameBot:
 
         if self.startup_index < len(self.config.startup_flow):
             self._next_sleep_override_sec = None
+            self.no_take_off_idle_since_epoch = None
             return self._run_startup_flow_step(frame)
 
         if not self.phase2_started:
@@ -2119,6 +2127,26 @@ class GameBot:
                 self._sleep(self.config.phase2.post_start_delay_sec)
 
         action_performed = self._run_phase2_cycle(frame)
+        if not self.config.test_mode and self.config.phase2.no_take_off_mode:
+            if self.phase2_plane_action_last_cycle:
+                self.no_take_off_idle_since_epoch = None
+            else:
+                now = time.time()
+                if self.no_take_off_idle_since_epoch is None:
+                    self.no_take_off_idle_since_epoch = now
+                elif (
+                    now - self.no_take_off_idle_since_epoch
+                    >= self.config.no_take_off_idle_timeout_sec
+                ):
+                    print(
+                        "[INFO] No processing/landing plane action for "
+                        f"{self.config.no_take_off_idle_timeout_sec:.0f}s in no-take-off mode. "
+                        "Requesting shutdown."
+                    )
+                    self._request_shutdown("no_take_off_idle_timeout")
+        else:
+            self.no_take_off_idle_since_epoch = None
+
         self._next_sleep_override_sec = (
             self.config.phase2.action_cycle_delay_sec
             if action_performed

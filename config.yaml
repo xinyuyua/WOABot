@@ -2,6 +2,7 @@ adb_path: adb
 serial: ""
 loop_interval_sec: 1.0
 jitter_sec: 0.2
+no_take_off_idle_timeout_sec: 120
 screenshot_dir: logs/screens
 debug_logging: false
 save_debug_screenshots: false
