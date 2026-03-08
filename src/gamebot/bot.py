@@ -78,6 +78,7 @@ class GameBot:
         self._next_sleep_override_sec: float | None = None
         self.no_take_off_idle_since_epoch: float | None = None
         self.phase2_plane_action_last_cycle = False
+        self.take_off_at_last_depart_started_epoch: float | None = None
 
         Path(self.config.screenshot_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1903,12 +1904,22 @@ class GameBot:
             self.phase2_plane_action_last_cycle = False
             return True
 
-        categories: list[tuple[str, Phase2CategoryConfig]] = [
-            ("processing", self.config.phase2.processing),
-            ("landing", self.config.phase2.landing),
-        ]
-        if not self.config.phase2.no_take_off_mode:
-            categories.append(("depart", self.config.phase2.depart))
+        categories: list[tuple[str, Phase2CategoryConfig]]
+        if self.config.take_off_at_last_mode and not self.config.test_mode:
+            if self.take_off_at_last_depart_started_epoch is None:
+                categories = [
+                    ("processing", self.config.phase2.processing),
+                    ("landing", self.config.phase2.landing),
+                ]
+            else:
+                categories = [("depart", self.config.phase2.depart)]
+        else:
+            categories = [
+                ("processing", self.config.phase2.processing),
+                ("landing", self.config.phase2.landing),
+            ]
+            if not self.config.phase2.no_take_off_mode:
+                categories.append(("depart", self.config.phase2.depart))
 
         if self.config.test_mode:
             self.phase2_plane_action_last_cycle = False
@@ -2119,6 +2130,7 @@ class GameBot:
         if self.startup_index < len(self.config.startup_flow):
             self._next_sleep_override_sec = None
             self.no_take_off_idle_since_epoch = None
+            self.take_off_at_last_depart_started_epoch = None
             return self._run_startup_flow_step(frame)
 
         if not self.phase2_started:
@@ -2127,7 +2139,35 @@ class GameBot:
                 self._sleep(self.config.phase2.post_start_delay_sec)
 
         action_performed = self._run_phase2_cycle(frame)
-        if not self.config.test_mode and self.config.phase2.no_take_off_mode:
+        if not self.config.test_mode and self.config.take_off_at_last_mode:
+            now = time.time()
+            if self.take_off_at_last_depart_started_epoch is None:
+                if self.phase2_plane_action_last_cycle:
+                    self.no_take_off_idle_since_epoch = None
+                else:
+                    if self.no_take_off_idle_since_epoch is None:
+                        self.no_take_off_idle_since_epoch = now
+                    elif (
+                        now - self.no_take_off_idle_since_epoch
+                        >= self.config.take_off_at_last_idle_timeout_sec
+                    ):
+                        self.take_off_at_last_depart_started_epoch = now
+                        self.no_take_off_idle_since_epoch = None
+                        print(
+                            "[INFO] take-off-at-last: no processing/landing action for "
+                            f"{self.config.take_off_at_last_idle_timeout_sec:.0f}s; switching to depart-only phase."
+                        )
+            else:
+                if (
+                    now - self.take_off_at_last_depart_started_epoch
+                    >= self.config.take_off_at_last_depart_duration_sec
+                ):
+                    print(
+                        "[INFO] take-off-at-last: depart-only phase completed ("
+                        f"{self.config.take_off_at_last_depart_duration_sec:.0f}s). Requesting shutdown."
+                    )
+                    self._request_shutdown("take_off_at_last_completed")
+        elif not self.config.test_mode and self.config.phase2.no_take_off_mode:
             if self.phase2_plane_action_last_cycle:
                 self.no_take_off_idle_since_epoch = None
             else:
@@ -2146,12 +2186,20 @@ class GameBot:
                     self._request_shutdown("no_take_off_idle_timeout")
         else:
             self.no_take_off_idle_since_epoch = None
+            self.take_off_at_last_depart_started_epoch = None
 
-        self._next_sleep_override_sec = (
-            self.config.phase2.action_cycle_delay_sec
-            if action_performed
-            else self.config.phase2.idle_cycle_delay_sec
-        )
+        if (
+            self.config.take_off_at_last_mode
+            and self.take_off_at_last_depart_started_epoch is not None
+            and action_performed
+        ):
+            self._next_sleep_override_sec = random.uniform(0.1, 0.3)
+        else:
+            self._next_sleep_override_sec = (
+                self.config.phase2.action_cycle_delay_sec
+                if action_performed
+                else self.config.phase2.idle_cycle_delay_sec
+            )
         return action_performed
 
     def run(self) -> None:

@@ -30,6 +30,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force normal mode including depart category.",
     )
+    mode_group.add_argument(
+        "--take-off-at-last-mode",
+        dest="take_off_at_last_mode",
+        action="store_true",
+        help=(
+            "Run processing+landing first, then after idle threshold switch to "
+            "depart-only phase for configured duration."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -85,10 +94,16 @@ def apply_runtime_overrides(cfg: BotConfig, args: argparse.Namespace) -> None:
 
     if args.no_take_off_mode:
         cfg.phase2.no_take_off_mode = True
+        cfg.take_off_at_last_mode = False
         print("[INFO] Runtime override applied: phase2.no_take_off_mode=true")
     elif args.take_off_mode:
         cfg.phase2.no_take_off_mode = False
+        cfg.take_off_at_last_mode = False
         print("[INFO] Runtime override applied: phase2.no_take_off_mode=false")
+    elif args.take_off_at_last_mode:
+        cfg.take_off_at_last_mode = True
+        cfg.phase2.no_take_off_mode = False
+        print("[INFO] Runtime override applied: take_off_at_last_mode=true")
 
 
 def main() -> None:
