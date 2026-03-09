@@ -585,7 +585,7 @@ def load_config(path: str) -> BotConfig:
     if take_off_at_last_idle_timeout_sec <= 0:
         raise ValueError("take_off_at_last_idle_timeout_sec must be > 0")
     take_off_at_last_depart_duration_sec = float(
-        cfg.get("take_off_at_last_depart_duration_sec", 60.0)
+        cfg.get("take_off_at_last_depart_duration_sec", 300.0)
     )
     if take_off_at_last_depart_duration_sec <= 0:
         raise ValueError("take_off_at_last_depart_duration_sec must be > 0")

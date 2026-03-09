@@ -4,8 +4,8 @@ loop_interval_sec: 1.0
 jitter_sec: 0.2
 no_take_off_idle_timeout_sec: 120
 take_off_at_last_mode: false
-take_off_at_last_idle_timeout_sec: 480
-take_off_at_last_depart_duration_sec: 60
+take_off_at_last_idle_timeout_sec: 180
+take_off_at_last_depart_duration_sec: 90
 screenshot_dir: logs/screens
 debug_logging: false
 save_debug_screenshots: false

@@ -1771,10 +1771,17 @@ class GameBot:
         frame: np.ndarray,
         category_name: str,
         category_cfg: Phase2CategoryConfig,
+        allow_tab_click_miss: bool = False,
     ) -> bool:
-        if not self._click_template_named(frame, category_cfg.tab_template, f"{category_name}_tab"):
+        tab_clicked = self._click_template_named(frame, category_cfg.tab_template, f"{category_name}_tab")
+        if tab_clicked:
+            self._sleep_exact(0.2)
+        elif not allow_tab_click_miss:
             return False
-        self._sleep_exact(0.2)
+        else:
+            self._log_debug(
+                f"[PHASE2] tab click miss tolerated for category={category_name}; continue with card scan"
+            )
 
         attempts = self._estimate_cards_per_category(self._capture_frame(), category_name)
         attempts = max(1, attempts)
@@ -1964,7 +1971,12 @@ class GameBot:
         for index, (name, cfg) in enumerate(categories):
             any_action = self._clear_incorrect_enabled_buttons() or any_action
             frame = self._capture_frame()
-            if self._handle_category(frame, name, cfg):
+            allow_tab_click_miss = (
+                self.config.take_off_at_last_mode
+                and self.take_off_at_last_depart_started_epoch is not None
+                and name == "depart"
+            )
+            if self._handle_category(frame, name, cfg, allow_tab_click_miss=allow_tab_click_miss):
                 self.phase2_plane_action_last_cycle = True
                 return True
             if self.shutdown_requested:
