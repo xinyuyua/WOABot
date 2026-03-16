@@ -72,8 +72,9 @@ Important flags:
 - `phase2.no_take_off_mode`: if `true`, skip departure and only run `processing -> landing`.
 - `no_take_off_idle_timeout_sec`: top-level timeout in seconds; when `phase2.no_take_off_mode` is `true`, bot exits if no processing/landing action occurs within this window.
 - `take_off_at_last_mode`: top-level mode. Run `processing+landing` first; after idle timeout, switch to depart-only for a fixed duration, then exit.
-- `take_off_at_last_idle_timeout_sec`: idle timeout (seconds) before switching to depart-only phase in `take_off_at_last_mode` (default `480`).
-- `take_off_at_last_depart_duration_sec`: duration (seconds) of depart-only phase in `take_off_at_last_mode` (default `300`).
+- `take_off_at_last_idle_timeout_sec`: idle timeout (seconds) before switching to depart-only phase in `take_off_at_last_mode` (default `180`).
+- `take_off_at_last_depart_duration_sec`: duration (seconds) of depart-only phase in `take_off_at_last_mode` (default `90`).
+- `game_package`: Android package name for force-stop close when take-off-at-last completes (optional). If empty, bot sends HOME keyevent instead.
 - `phase2.stop_on_unhandled_processing_state`: if `true`, stop bot on unknown processing state; if `false`, warn and continue.
 
 ### Template naming for incorrect enabled filters
@@ -127,6 +128,8 @@ python3 run_bot.py --config config.yaml --take-off-mode
 # take-off-at-last mode (processing+landing first, then depart-only phase)
 python3 run_bot.py --config config.yaml --take-off-at-last-mode
 ```
+
+python3 run_bot.py --config config.yaml --airport-image airport_prg.png --take-off-at-last-mode
 
 ## Current behavior summary
 

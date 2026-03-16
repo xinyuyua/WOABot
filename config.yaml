@@ -1,5 +1,6 @@
 adb_path: adb
 serial: ""
+game_package: "com.haugland.woa"
 loop_interval_sec: 1.0
 jitter_sec: 0.2
 no_take_off_idle_timeout_sec: 120

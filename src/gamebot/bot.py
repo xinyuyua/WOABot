@@ -79,6 +79,7 @@ class GameBot:
         self.no_take_off_idle_since_epoch: float | None = None
         self.phase2_plane_action_last_cycle = False
         self.take_off_at_last_depart_started_epoch: float | None = None
+        self.shutdown_reason: str = ""
 
         Path(self.config.screenshot_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1401,7 +1402,30 @@ class GameBot:
         if self.shutdown_requested:
             return
         self.shutdown_requested = True
+        self.shutdown_reason = reason
         print(f"[INFO] Shutdown requested ({reason}). Finishing current loop...")
+
+    def _close_game_on_exit_if_needed(self) -> None:
+        if self.config.test_mode:
+            return
+        if not self.config.take_off_at_last_mode:
+            return
+        if self.shutdown_reason != "take_off_at_last_completed":
+            return
+
+        package_raw = self.config.game_package.strip()
+        package = package_raw
+        if package.startswith("package:"):
+            package = package.split("package:", 1)[1].strip()
+        try:
+            if package:
+                self.adb.force_stop(package)
+                print(f"[INFO] Closed game via force-stop package={package}")
+            else:
+                self.adb.keyevent("KEYCODE_HOME")
+                print("[INFO] Closed game via HOME keyevent (set `game_package` for force-stop).")
+        except Exception as exc:
+            self._log_warn(f"failed_to_close_game_on_exit: {exc}")
 
     def _print_shutdown_report(self) -> None:
         processing = self.handled_action_counts.get("processing", 0)
@@ -2246,4 +2270,5 @@ class GameBot:
         finally:
             signal.signal(signal.SIGINT, prev_sigint)
             signal.signal(signal.SIGTERM, prev_sigterm)
+            self._close_game_on_exit_if_needed()
             self._print_shutdown_report()

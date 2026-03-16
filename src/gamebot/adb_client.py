@@ -61,3 +61,9 @@ class AdbClient:
             str(y2),
             str(duration_ms),
         )
+
+    def keyevent(self, keycode: str) -> None:
+        self.run("shell", "input", "keyevent", keycode)
+
+    def force_stop(self, package_name: str) -> None:
+        self.run("shell", "am", "force-stop", package_name)

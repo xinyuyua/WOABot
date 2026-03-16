@@ -133,6 +133,7 @@ class Phase2Config:
 class BotConfig:
     adb_path: str
     serial: str
+    game_package: str
     loop_interval_sec: float
     jitter_sec: float
     no_take_off_idle_timeout_sec: float
@@ -593,6 +594,7 @@ def load_config(path: str) -> BotConfig:
     return BotConfig(
         adb_path=cfg["adb_path"],
         serial=cfg["serial"],
+        game_package=str(cfg.get("game_package", "")),
         loop_interval_sec=float(cfg["loop_interval_sec"]),
         jitter_sec=float(cfg["jitter_sec"]),
         no_take_off_idle_timeout_sec=no_take_off_idle_timeout_sec,
