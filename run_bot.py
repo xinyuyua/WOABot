@@ -15,6 +15,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Minimal ADB game automation bot")
     parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
     parser.add_argument(
+        "--save-debug-screenshots",
+        action="store_true",
+        help="Enable all debug/warning/failure screenshot generation for this run.",
+    )
+    parser.add_argument(
         "--airport-image",
         default="",
         help="Override airport image filename for pick_airport_image step(s), e.g. airport_inn.png",
@@ -81,6 +86,10 @@ def restart_adb_server(adb_path: str) -> None:
 
 
 def apply_runtime_overrides(cfg: BotConfig, args: argparse.Namespace) -> None:
+    if args.save_debug_screenshots:
+        cfg.save_debug_screenshots = True
+        print("[INFO] Runtime override applied: save_debug_screenshots=true")
+
     if args.airport_image:
         patched = False
         for step in cfg.startup_flow:

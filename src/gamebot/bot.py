@@ -80,7 +80,6 @@ class GameBot:
         self.phase2_plane_action_last_cycle = False
         self.take_off_at_last_depart_started_epoch: float | None = None
         self.shutdown_reason: str = ""
-
         Path(self.config.screenshot_dir).mkdir(parents=True, exist_ok=True)
 
     def _capture_frame(self) -> np.ndarray:
@@ -172,6 +171,13 @@ class GameBot:
         debug_label: str | None = None,
     ) -> tuple[int, int]:
         x, y = self._resolve_match_center(frame, match, offset_x, offset_y)
+        if self._should_apply_tap_jitter(match.name):
+            x, y = self._apply_tap_jitter(
+                frame,
+                x,
+                y,
+                bounds=(match.x, match.y, match.x + match.w, match.y + match.h),
+            )
         self.adb.tap(x, y)
         self._save_action_debug(
             frame,
@@ -195,6 +201,51 @@ class GameBot:
         y = max(0, min(y, height - 1))
         return x, y
 
+    def _apply_tap_jitter(
+        self,
+        frame: np.ndarray,
+        x: int,
+        y: int,
+        bounds: tuple[int, int, int, int] | None = None,
+    ) -> tuple[int, int]:
+        height, width = frame.shape[:2]
+        if bounds is None:
+            radius_x = 4
+            radius_y = 4
+            min_x = 0
+            min_y = 0
+            max_x = width - 1
+            max_y = height - 1
+        else:
+            x1, y1, x2, y2 = bounds
+            inset_x = max(1, min(6, (x2 - x1) // 5))
+            inset_y = max(1, min(6, (y2 - y1) // 5))
+            min_x = max(0, x1 + inset_x)
+            min_y = max(0, y1 + inset_y)
+            max_x = min(width - 1, x2 - inset_x - 1)
+            max_y = min(height - 1, y2 - inset_y - 1)
+            if min_x > max_x:
+                min_x = max(0, x1)
+                max_x = min(width - 1, x2 - 1)
+            if min_y > max_y:
+                min_y = max(0, y1)
+                max_y = min(height - 1, y2 - 1)
+            radius_x = max(1, min(5, (max_x - min_x) // 3))
+            radius_y = max(1, min(5, (max_y - min_y) // 3))
+
+        jittered_x = x + random.randint(-radius_x, radius_x)
+        jittered_y = y + random.randint(-radius_y, radius_y)
+        jittered_x = max(min_x, min(jittered_x, max_x))
+        jittered_y = max(min_y, min(jittered_y, max_y))
+        return jittered_x, jittered_y
+
+    def _should_apply_tap_jitter(self, template_name: str | None = None) -> bool:
+        if not self.phase2_started:
+            return False
+        if template_name == self.config.phase2.grey_mode_template:
+            return False
+        return True
+
     def _find_match(self, frame: np.ndarray, template_name: str) -> MatchResult | None:
         tmpl = self.templates.get(template_name)
         if tmpl is None:
@@ -216,7 +267,7 @@ class GameBot:
         return float(max_val), int(max_loc[0]), int(max_loc[1])
 
     def _save_debug(self, frame: np.ndarray, label: str, force: bool = False) -> str | None:
-        if not force and not self.config.save_debug_screenshots:
+        if not self.config.save_debug_screenshots:
             return None
         ts = int(time.time() * 1000)
         safe_label = re.sub(r"[^a-zA-Z0-9_.-]+", "_", label).strip("_") or "debug"
@@ -279,6 +330,8 @@ class GameBot:
         height, width = frame.shape[:2]
         cx = max(0, min(x, width - 1))
         cy = max(0, min(y, height - 1))
+        if do_tap and self._should_apply_tap_jitter():
+            cx, cy = self._apply_tap_jitter(frame, cx, cy)
         if do_tap:
             self.adb.tap(cx, cy)
             self._save_action_debug(frame, debug_label, tap_xy=(cx, cy))
@@ -383,6 +436,11 @@ class GameBot:
         if not match:
             if step.template == "play_button":
                 self._try_reclick_airport_for_play_recovery(frame)
+                return False
+            if step.template == "start_button":
+                if self._try_start_phase2_from_grey_mode(frame):
+                    print("[INFO] Start button not found. Entering phase 2 via grey mode recovery.")
+                    return True
             return False
 
         action_cfg = self.template_actions.get(step.template, ActionConfig(type="tap_center"))
@@ -402,6 +460,27 @@ class GameBot:
         cv2.circle(debug, (x, y), 8, (0, 0, 255), -1)
         self._save_debug(debug, f"flow_hit_{match.name}")
         self.startup_index += 1
+        return True
+
+    def _try_start_phase2_from_grey_mode(self, frame: np.ndarray) -> bool:
+        grey_template_name = self.config.phase2.grey_mode_template
+        if not grey_template_name:
+            return False
+
+        grey_tmpl = self.templates.get(grey_template_name)
+        if grey_tmpl is None:
+            self._warn_missing_template_once(grey_template_name)
+            return False
+
+        match = match_template(frame, grey_tmpl)
+        if not match:
+            return False
+
+        self._tap_match_center(frame, match, debug_label="start_recover_grey_mode")
+        self.phase2_grey_enabled = True
+        self.startup_index = len(self.config.startup_flow)
+        self.airport_scroll_count = 0
+        self._log_debug(f"[STARTUP] recovered directly to phase2 using {grey_template_name}")
         return True
 
     def _try_reclick_airport_for_play_recovery(self, frame: np.ndarray) -> None:
@@ -662,7 +741,14 @@ class GameBot:
                     # Cache stale for current frame; force full-screen rematch and refresh.
                     self._log_debug(f"[CACHE] button_stale template={template_name} cached=({cx},{cy})")
 
-        match = match_template(frame, tmpl)
+        if self._is_tab_template_name(template_name):
+            match = self._match_template_in_rect_pct(
+                frame,
+                template_name,
+                self.config.phase2.card_list_region_pct,
+            )
+        else:
+            match = match_template(frame, tmpl)
         if not match:
             return False
         if self._is_tab_template_name(template_name):
@@ -781,6 +867,31 @@ class GameBot:
             return None
         return match_template(frame, tmpl)
 
+    def _match_template_in_rect_pct(
+        self,
+        frame: np.ndarray,
+        template_name: str,
+        rect: RectPctConfig | None,
+    ) -> MatchResult | None:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return None
+        if rect is None:
+            return match_template(frame, tmpl)
+        crop, ox, oy = self._crop_by_rect_pct(frame, rect)
+        match = match_template(crop, tmpl)
+        if match is None:
+            return None
+        return MatchResult(
+            name=match.name,
+            confidence=match.confidence,
+            x=ox + match.x,
+            y=oy + match.y,
+            w=match.w,
+            h=match.h,
+        )
+
     def _find_preferred_lower_left_match_named(
         self, frame: np.ndarray, template_name: str, require_left_panel: bool = False
     ) -> MatchResult | None:
@@ -858,10 +969,138 @@ class GameBot:
             h=tmpl.image.shape[0],
         )
 
+    def _find_match_near_point_named(
+        self,
+        frame: np.ndarray,
+        template_name: str,
+        target_x: int,
+        target_y: int,
+        max_dx: int = 80,
+        max_dy: int = 40,
+    ) -> MatchResult | None:
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return None
+        result = cv2.matchTemplate(frame, tmpl.image, cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(result >= tmpl.threshold)
+        if len(xs) == 0:
+            return None
+
+        best: tuple[float, float, int, int] | None = None
+        for x_raw, y_raw in zip(xs.tolist(), ys.tolist()):
+            x = int(x_raw)
+            y = int(y_raw)
+            cx = x + (tmpl.image.shape[1] // 2)
+            cy = y + (tmpl.image.shape[0] // 2)
+            dx = abs(cx - target_x)
+            dy = abs(cy - target_y)
+            if dx > max_dx or dy > max_dy:
+                continue
+            conf = float(result[y, x])
+            distance = float((dx * dx) + (dy * dy))
+            candidate = (distance, -conf, x, y)
+            if best is None or candidate < best:
+                best = candidate
+
+        if best is None:
+            return None
+
+        _, neg_conf, x, y = best
+        return MatchResult(
+            name=tmpl.name,
+            confidence=-neg_conf,
+            x=x,
+            y=y,
+            w=tmpl.image.shape[1],
+            h=tmpl.image.shape[0],
+        )
+
+    def _find_processing_add_match(self, frame: np.ndarray) -> MatchResult | None:
+        template_name = self.config.phase2.processing_add_enabled_template
+        tmpl = self.templates.get(template_name)
+        if tmpl is None:
+            self._warn_missing_template_once(template_name)
+            return None
+
+        result = cv2.matchTemplate(frame, tmpl.image, cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(result >= tmpl.threshold)
+        if len(xs) == 0:
+            return None
+
+        height, width = frame.shape[:2]
+        min_center_x = int(width * 0.5)
+        candidates: list[MatchResult] = []
+        for x_raw, y_raw in zip(xs.tolist(), ys.tolist()):
+            x = int(x_raw)
+            y = int(y_raw)
+            cx = x + (tmpl.image.shape[1] // 2)
+            cy = y + (tmpl.image.shape[0] // 2)
+            if cx < min_center_x:
+                continue
+            candidates.append(
+                MatchResult(
+                    name=tmpl.name,
+                    confidence=float(result[y, x]),
+                    x=x,
+                    y=y,
+                    w=tmpl.image.shape[1],
+                    h=tmpl.image.shape[0],
+                )
+            )
+
+        if not candidates:
+            return None
+
+        if self.processing_add_button_anchor_px is not None:
+            anchor_x, anchor_y = self.processing_add_button_anchor_px
+            near_candidates = [
+                c
+                for c in candidates
+                if abs((c.x + c.w // 2) - anchor_x) <= 80 and abs((c.y + c.h // 2) - anchor_y) <= 40
+            ]
+            if near_candidates:
+                candidates = near_candidates
+
+        candidates.sort(
+            key=lambda c: (
+                -(c.x + c.w // 2),
+                -c.confidence,
+            )
+        )
+        return candidates[0]
+
     def _set_processing_add_anchor_from_match(self, frame: np.ndarray, match: MatchResult) -> None:
         x, y = self._resolve_match_center(frame, match)
         self.processing_add_button_anchor_px = (x, y)
         print(f"[PHASE2] processing add_anchor set=({x},{y}) conf={match.confidence:.3f}")
+
+    def _check_processing_add_anchor_drift(
+        self,
+        frame: np.ndarray,
+        match: MatchResult | None,
+    ) -> bool:
+        if not self.config.debug_logging:
+            return False
+        if match is None or self.processing_add_button_anchor_px is None:
+            return False
+
+        detected_x, detected_y = self._resolve_match_center(frame, match)
+        anchor_x, anchor_y = self.processing_add_button_anchor_px
+        dx = detected_x - anchor_x
+        dy = detected_y - anchor_y
+        tolerance_px = 3
+        if abs(dx) <= tolerance_px and abs(dy) <= tolerance_px:
+            return False
+
+        self._log_warn(
+            "processing_add_anchor_shift "
+            f"cached=({anchor_x},{anchor_y}) detected=({detected_x},{detected_y}) "
+            f"delta=({dx},{dy}) tolerance_px={tolerance_px} conf={match.confidence:.3f}",
+            frame=frame,
+        )
+        self._request_shutdown("processing_add_anchor_shift")
+        return True
 
     def _click_processing_add_anchor(self, frame: np.ndarray) -> bool:
         if self.processing_add_button_anchor_px is None:
@@ -1593,11 +1832,11 @@ class GameBot:
             ):
                 add_loop_reason = "not_enough_before_toggle"
                 break
-            add_match = self._find_rightmost_match_named(
-                frame, self.config.phase2.processing_add_enabled_template
-            )
+            add_match = self._find_processing_add_match(frame)
             if self.processing_add_button_anchor_px is None and add_match is not None:
                 self._set_processing_add_anchor_from_match(frame, add_match)
+            elif self._check_processing_add_anchor_drift(frame, add_match):
+                return False
             if not self._click_processing_add_anchor(frame):
                 if add_match is None:
                     add_loop_reason = "add_button_not_found_and_no_anchor"
