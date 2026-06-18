@@ -5,10 +5,10 @@ loop_interval_sec: 1.0
 jitter_sec: 0.2
 no_take_off_idle_timeout_sec: 120
 take_off_at_last_mode: false
-take_off_at_last_idle_timeout_sec: 180
+take_off_at_last_idle_timeout_sec: 360
 take_off_at_last_depart_duration_sec: 90
 screenshot_dir: logs/screens
-debug_logging: false
+debug_logging: true
 save_debug_screenshots: false
 test_mode: false
 
@@ -49,13 +49,13 @@ templates:
 
   - name: processing_tab_button
     path: templates/processing_tab_button.png
-    threshold: 0.90
+    threshold: 0.85
     action:
       type: tap_center
 
   - name: landing_tab_button
     path: templates/landing_tab_button.png
-    threshold: 0.90
+    threshold: 0.85
     action:
       type: tap_center
 

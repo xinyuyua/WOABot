@@ -73,12 +73,12 @@ class GameBot:
             "landing": 0,
             "depart": 0,
         }
-        self.run_started_epoch: float = 0.0
+        self.run_started_monotonic: float = 0.0
 
         self._next_sleep_override_sec: float | None = None
-        self.no_take_off_idle_since_epoch: float | None = None
+        self.no_take_off_idle_since_monotonic: float | None = None
         self.phase2_plane_action_last_cycle = False
-        self.take_off_at_last_depart_started_epoch: float | None = None
+        self.take_off_at_last_depart_started_monotonic: float | None = None
         self.shutdown_reason: str = ""
         Path(self.config.screenshot_dir).mkdir(parents=True, exist_ok=True)
 
@@ -124,8 +124,8 @@ class GameBot:
         ):
             return frame
 
-        deadline = time.time() + max(0.1, timeout_sec)
-        while time.time() < deadline:
+        deadline = time.monotonic() + max(0.1, timeout_sec)
+        while time.monotonic() < deadline:
             if self._is_detail_anchor_visible(frame):
                 return frame
             self._sleep_exact(0.06)
@@ -1671,7 +1671,7 @@ class GameBot:
         landing = self.handled_action_counts.get("landing", 0)
         depart = self.handled_action_counts.get("depart", 0)
         total = processing + landing + depart
-        runtime_sec = max(0.0, time.time() - self.run_started_epoch)
+        runtime_sec = max(0.0, time.monotonic() - self.run_started_monotonic)
         runtime_int = int(runtime_sec)
         hours = runtime_int // 3600
         minutes = (runtime_int % 3600) // 60
@@ -2176,7 +2176,7 @@ class GameBot:
 
         categories: list[tuple[str, Phase2CategoryConfig]]
         if self.config.take_off_at_last_mode and not self.config.test_mode:
-            if self.take_off_at_last_depart_started_epoch is None:
+            if self.take_off_at_last_depart_started_monotonic is None:
                 categories = [
                     ("processing", self.config.phase2.processing),
                     ("landing", self.config.phase2.landing),
@@ -2236,7 +2236,7 @@ class GameBot:
             frame = self._capture_frame()
             allow_tab_click_miss = (
                 self.config.take_off_at_last_mode
-                and self.take_off_at_last_depart_started_epoch is not None
+                and self.take_off_at_last_depart_started_monotonic is not None
                 and name == "depart"
             )
             if self._handle_category(frame, name, cfg, allow_tab_click_miss=allow_tab_click_miss):
@@ -2404,8 +2404,8 @@ class GameBot:
 
         if self.startup_index < len(self.config.startup_flow):
             self._next_sleep_override_sec = None
-            self.no_take_off_idle_since_epoch = None
-            self.take_off_at_last_depart_started_epoch = None
+            self.no_take_off_idle_since_monotonic = None
+            self.take_off_at_last_depart_started_monotonic = None
             return self._run_startup_flow_step(frame)
 
         if not self.phase2_started:
@@ -2415,28 +2415,44 @@ class GameBot:
 
         action_performed = self._run_phase2_cycle(frame)
         if not self.config.test_mode and self.config.take_off_at_last_mode:
-            now = time.time()
-            if self.take_off_at_last_depart_started_epoch is None:
+            now = time.monotonic()
+            if self.take_off_at_last_depart_started_monotonic is None:
                 if self.phase2_plane_action_last_cycle:
-                    self.no_take_off_idle_since_epoch = None
-                else:
-                    if self.no_take_off_idle_since_epoch is None:
-                        self.no_take_off_idle_since_epoch = now
-                    elif (
-                        now - self.no_take_off_idle_since_epoch
-                        >= self.config.take_off_at_last_idle_timeout_sec
-                    ):
-                        self.take_off_at_last_depart_started_epoch = now
-                        self.no_take_off_idle_since_epoch = None
-                        print(
-                            "[INFO] take-off-at-last: no processing/landing action for "
-                            f"{self.config.take_off_at_last_idle_timeout_sec:.0f}s; switching to depart-only phase."
+                    if self.no_take_off_idle_since_monotonic is not None:
+                        self._log_debug(
+                            "[PHASE2] take-off-at-last idle timer reset because a "
+                            "processing/landing action happened this cycle"
                         )
+                    self.no_take_off_idle_since_monotonic = None
+                else:
+                    if self.no_take_off_idle_since_monotonic is None:
+                        self.no_take_off_idle_since_monotonic = now
+                        self._log_debug(
+                            "[PHASE2] take-off-at-last idle timer started "
+                            f"threshold={self.config.take_off_at_last_idle_timeout_sec:.1f}s"
+                        )
+                    else:
+                        elapsed = now - self.no_take_off_idle_since_monotonic
+                        self._log_debug(
+                            "[PHASE2] take-off-at-last idle timer running "
+                            f"elapsed={elapsed:.1f}s "
+                            f"threshold={self.config.take_off_at_last_idle_timeout_sec:.1f}s"
+                        )
+                        if elapsed >= self.config.take_off_at_last_idle_timeout_sec:
+                            self.take_off_at_last_depart_started_monotonic = now
+                            self.no_take_off_idle_since_monotonic = None
+                            print(
+                                "[INFO] take-off-at-last: no processing/landing action for "
+                                f"{self.config.take_off_at_last_idle_timeout_sec:.0f}s; switching to depart-only phase."
+                            )
             else:
-                if (
-                    now - self.take_off_at_last_depart_started_epoch
-                    >= self.config.take_off_at_last_depart_duration_sec
-                ):
+                elapsed = now - self.take_off_at_last_depart_started_monotonic
+                self._log_debug(
+                    "[PHASE2] take-off-at-last depart timer running "
+                    f"elapsed={elapsed:.1f}s "
+                    f"threshold={self.config.take_off_at_last_depart_duration_sec:.1f}s"
+                )
+                if elapsed >= self.config.take_off_at_last_depart_duration_sec:
                     print(
                         "[INFO] take-off-at-last: depart-only phase completed ("
                         f"{self.config.take_off_at_last_depart_duration_sec:.0f}s). Requesting shutdown."
@@ -2444,28 +2460,41 @@ class GameBot:
                     self._request_shutdown("take_off_at_last_completed")
         elif not self.config.test_mode and self.config.phase2.no_take_off_mode:
             if self.phase2_plane_action_last_cycle:
-                self.no_take_off_idle_since_epoch = None
-            else:
-                now = time.time()
-                if self.no_take_off_idle_since_epoch is None:
-                    self.no_take_off_idle_since_epoch = now
-                elif (
-                    now - self.no_take_off_idle_since_epoch
-                    >= self.config.no_take_off_idle_timeout_sec
-                ):
-                    print(
-                        "[INFO] No processing/landing plane action for "
-                        f"{self.config.no_take_off_idle_timeout_sec:.0f}s in no-take-off mode. "
-                        "Requesting shutdown."
+                if self.no_take_off_idle_since_monotonic is not None:
+                    self._log_debug(
+                        "[PHASE2] no-take-off idle timer reset because a "
+                        "processing/landing action happened this cycle"
                     )
-                    self._request_shutdown("no_take_off_idle_timeout")
+                self.no_take_off_idle_since_monotonic = None
+            else:
+                now = time.monotonic()
+                if self.no_take_off_idle_since_monotonic is None:
+                    self.no_take_off_idle_since_monotonic = now
+                    self._log_debug(
+                        "[PHASE2] no-take-off idle timer started "
+                        f"threshold={self.config.no_take_off_idle_timeout_sec:.1f}s"
+                    )
+                else:
+                    elapsed = now - self.no_take_off_idle_since_monotonic
+                    self._log_debug(
+                        "[PHASE2] no-take-off idle timer running "
+                        f"elapsed={elapsed:.1f}s "
+                        f"threshold={self.config.no_take_off_idle_timeout_sec:.1f}s"
+                    )
+                    if elapsed >= self.config.no_take_off_idle_timeout_sec:
+                        print(
+                            "[INFO] No processing/landing plane action for "
+                            f"{self.config.no_take_off_idle_timeout_sec:.0f}s in no-take-off mode. "
+                            "Requesting shutdown."
+                        )
+                        self._request_shutdown("no_take_off_idle_timeout")
         else:
-            self.no_take_off_idle_since_epoch = None
-            self.take_off_at_last_depart_started_epoch = None
+            self.no_take_off_idle_since_monotonic = None
+            self.take_off_at_last_depart_started_monotonic = None
 
         if (
             self.config.take_off_at_last_mode
-            and self.take_off_at_last_depart_started_epoch is not None
+            and self.take_off_at_last_depart_started_monotonic is not None
             and action_performed
         ):
             self._next_sleep_override_sec = random.uniform(0.1, 0.3)
@@ -2479,7 +2508,7 @@ class GameBot:
 
     def run(self) -> None:
         print("[INFO] Starting bot loop. Press Ctrl+C to stop.")
-        self.run_started_epoch = time.time()
+        self.run_started_monotonic = time.monotonic()
         prev_sigint = signal.getsignal(signal.SIGINT)
         prev_sigterm = signal.getsignal(signal.SIGTERM)
 

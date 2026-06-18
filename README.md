@@ -209,7 +209,7 @@ Tune these rectangles in `config.yaml` if plane name/model extraction is unstabl
   - if multiple devices are connected, set `serial` in `config.yaml`
 - `Screenshot bytes are empty or not a valid PNG stream`:
   - verify `adb devices`
-  - run `adb exec-out screencap -p > /tmp/screen.png`
+  - run `adb exec-out screencap -p > screen.png`
 - OCR not detecting expected text:
   - enable `debug_logging: true`
   - tune OCR region rectangles in `phase2`
