@@ -140,6 +140,8 @@ class BotConfig:
     take_off_at_last_mode: bool
     take_off_at_last_idle_timeout_sec: float
     take_off_at_last_depart_duration_sec: float
+    failure_timeout_sec: float
+    run_time_limit_sec: float | None
     screenshot_dir: str
     debug_logging: bool
     save_debug_screenshots: bool
@@ -591,6 +593,15 @@ def load_config(path: str) -> BotConfig:
     if take_off_at_last_depart_duration_sec <= 0:
         raise ValueError("take_off_at_last_depart_duration_sec must be > 0")
 
+    failure_timeout_sec = float(cfg.get("failure_timeout_sec", 300.0))
+    if failure_timeout_sec <= 0:
+        raise ValueError("failure_timeout_sec must be > 0")
+
+    run_time_limit_raw = cfg.get("run_time_limit_sec")
+    run_time_limit_sec = float(run_time_limit_raw) if run_time_limit_raw is not None else None
+    if run_time_limit_sec is not None and run_time_limit_sec <= 0:
+        raise ValueError("run_time_limit_sec must be > 0")
+
     return BotConfig(
         adb_path=cfg["adb_path"],
         serial=cfg["serial"],
@@ -601,6 +612,8 @@ def load_config(path: str) -> BotConfig:
         take_off_at_last_mode=bool(cfg.get("take_off_at_last_mode", False)),
         take_off_at_last_idle_timeout_sec=take_off_at_last_idle_timeout_sec,
         take_off_at_last_depart_duration_sec=take_off_at_last_depart_duration_sec,
+        failure_timeout_sec=failure_timeout_sec,
+        run_time_limit_sec=run_time_limit_sec,
         screenshot_dir=cfg["screenshot_dir"],
         debug_logging=bool(cfg.get("debug_logging", False)),
         save_debug_screenshots=bool(cfg["save_debug_screenshots"]),

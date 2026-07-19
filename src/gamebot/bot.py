@@ -74,6 +74,9 @@ class GameBot:
             "depart": 0,
         }
         self.run_started_monotonic: float = 0.0
+        self.last_action_monotonic: float = 0.0
+        self.current_category_tab: str | None = None
+        self.current_category_tab_xy: tuple[int, int] | None = None
 
         self._next_sleep_override_sec: float | None = None
         self.no_take_off_idle_since_monotonic: float | None = None
@@ -2029,6 +2032,65 @@ class GameBot:
         self._record_plane_action(plane_name, "depart", "skip_no_depart_action", plane_model)
         return False
 
+    def _switch_category_tab(
+        self,
+        frame: np.ndarray,
+        target_tab_template: str,
+        category_name: str,
+    ) -> tuple[bool, np.ndarray]:
+        if not target_tab_template:
+            return False, frame
+
+        # Check if we need to deselect the previous tab
+        if (
+            self.current_category_tab is not None
+            and self.current_category_tab != target_tab_template
+        ):
+            self._log_debug(
+                f"[TAB-SWITCH] Deselecting previous tab {self.current_category_tab} before selecting {target_tab_template}"
+            )
+            # Click the current tab again to deselect
+            deselected = False
+            if self.current_category_tab_xy is not None:
+                tx, ty = self.current_category_tab_xy
+                self._log_debug(
+                    f"[TAB-SWITCH] Deselect click by coordinates tap=({tx},{ty}) for {self.current_category_tab}"
+                )
+                self.adb.tap(tx, ty)
+                self._save_action_debug(
+                    frame,
+                    f"deselect_{self.current_category_tab}",
+                    tap_xy=(tx, ty),
+                )
+                deselected = True
+            else:
+                deselected = self._click_template_named(
+                    frame,
+                    self.current_category_tab,
+                    f"deselect_{self.current_category_tab}",
+                )
+
+            if deselected:
+                self.current_category_tab = None
+                self.current_category_tab_xy = None
+                self._sleep(max(0.1, self.config.phase2.inter_click_delay_sec))
+                frame = self._capture_frame()
+
+        # Select the target tab
+        tab_clicked = self._click_template_named(
+            frame,
+            target_tab_template,
+            f"{category_name}_tab",
+        )
+        if tab_clicked:
+            self.current_category_tab = target_tab_template
+            self.current_category_tab_xy = self.button_tap_cache_px.get(target_tab_template)
+            self._sleep_exact(0.2)
+            frame = self._capture_frame()
+            return True, frame
+
+        return False, frame
+
     def _handle_category(
         self,
         frame: np.ndarray,
@@ -2036,12 +2098,10 @@ class GameBot:
         category_cfg: Phase2CategoryConfig,
         allow_tab_click_miss: bool = False,
     ) -> bool:
-        tab_clicked = self._click_template_named(frame, category_cfg.tab_template, f"{category_name}_tab")
-        if tab_clicked:
-            self._sleep_exact(0.2)
-        elif not allow_tab_click_miss:
+        tab_clicked, frame = self._switch_category_tab(frame, category_cfg.tab_template, category_name)
+        if not tab_clicked and not allow_tab_click_miss:
             return False
-        else:
+        elif not tab_clicked:
             self._log_debug(
                 f"[PHASE2] tab click miss tolerated for category={category_name}; continue with card scan"
             )
@@ -2200,17 +2260,15 @@ class GameBot:
                     break
                 any_action = self._clear_incorrect_enabled_buttons() or any_action
                 frame = self._capture_frame()
-                tab_clicked = self._click_template_named(
+                tab_clicked, frame = self._switch_category_tab(
                     frame,
                     cfg.tab_template,
-                    f"test_mode_{name}_tab",
-                    dry_run=False,
+                    f"test_mode_{name}",
                 )
                 card_clicked = False
                 if tab_clicked:
-                    self._sleep_exact(0.2)
                     card_clicked = self._test_mode_select_next_card(
-                        self._capture_frame(),
+                        frame,
                         name,
                         dry_run=False,
                     )
@@ -2403,6 +2461,8 @@ class GameBot:
         frame = self._capture_frame()
 
         if self.startup_index < len(self.config.startup_flow):
+            self.current_category_tab = None
+            self.current_category_tab_xy = None
             self._next_sleep_override_sec = None
             self.no_take_off_idle_since_monotonic = None
             self.take_off_at_last_depart_started_monotonic = None
@@ -2509,6 +2569,7 @@ class GameBot:
     def run(self) -> None:
         print("[INFO] Starting bot loop. Press Ctrl+C to stop.")
         self.run_started_monotonic = time.monotonic()
+        self.last_action_monotonic = self.run_started_monotonic
         prev_sigint = signal.getsignal(signal.SIGINT)
         prev_sigterm = signal.getsignal(signal.SIGTERM)
 
@@ -2521,8 +2582,22 @@ class GameBot:
 
         try:
             while not self.shutdown_requested:
+                if self.config.run_time_limit_sec is not None:
+                    elapsed_run = time.monotonic() - self.run_started_monotonic
+                    if elapsed_run >= self.config.run_time_limit_sec:
+                        self._request_shutdown(f"run_time_limit_reached ({elapsed_run:.1f}s >= {self.config.run_time_limit_sec:.1f}s)")
+                        break
+
+                if self.config.failure_timeout_sec is not None:
+                    elapsed_inactive = time.monotonic() - self.last_action_monotonic
+                    if elapsed_inactive >= self.config.failure_timeout_sec:
+                        self._request_shutdown(f"failure_timeout ({elapsed_inactive:.1f}s >= {self.config.failure_timeout_sec:.1f}s)")
+                        break
+
                 try:
-                    self.step()
+                    action_performed = self.step()
+                    if action_performed:
+                        self.last_action_monotonic = time.monotonic()
                 except Exception as exc:
                     self._log_error(str(exc))
                 if self.shutdown_requested:

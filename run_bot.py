@@ -11,6 +11,33 @@ from src.gamebot.bot import GameBot
 from src.gamebot.config import BotConfig, load_config
 
 
+def parse_duration(val: str) -> float:
+    val_str = val.strip()
+    if not val_str:
+        raise argparse.ArgumentTypeError("Duration value cannot be empty.")
+    if val_str.endswith("s"):
+        try:
+            return float(val_str[:-1])
+        except ValueError:
+            pass
+    elif val_str.endswith("m"):
+        try:
+            return float(val_str[:-1]) * 60
+        except ValueError:
+            pass
+    elif val_str.endswith("h"):
+        try:
+            return float(val_str[:-1]) * 3600
+        except ValueError:
+            pass
+    try:
+        return float(val_str)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid duration format: '{val}'. Expected float or string with s/m/h suffix."
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Minimal ADB game automation bot")
     parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
@@ -23,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         "--airport-image",
         default="",
         help="Override airport image filename for pick_airport_image step(s), e.g. airport_inn.png",
+    )
+    parser.add_argument(
+        "--run-time",
+        type=parse_duration,
+        help="Control the run time of the script (e.g. 300, 5m, 1h). Script auto stops after this duration.",
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -86,6 +118,10 @@ def restart_adb_server(adb_path: str) -> None:
 
 
 def apply_runtime_overrides(cfg: BotConfig, args: argparse.Namespace) -> None:
+    if args.run_time is not None:
+        cfg.run_time_limit_sec = args.run_time
+        print(f"[INFO] Runtime override applied: run_time_limit_sec={cfg.run_time_limit_sec}s")
+
     if args.save_debug_screenshots:
         cfg.save_debug_screenshots = True
         print("[INFO] Runtime override applied: save_debug_screenshots=true")
